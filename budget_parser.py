@@ -3,11 +3,11 @@
 State Budget Bill Analyzer
 Extracts agency/department appropriations from a PDF and produces a summary report.
 
-Extraction strategy:
-  - Looks for "TOTAL - [ENTITY NAME]" header lines, which mark the authoritative
-    summary for each cabinet, department, or agency in the bill.
-  - Captures the TOTAL row (all-funds combined) for fiscal year columns that follow.
-  - Falls back to a line-by-line TOTAL pattern for documents that lack "TOTAL - X" headers.
+Extraction strategies (tried in order):
+  1. Kentucky-style: finds "TOTAL - [ENTITY]" header lines and reads the TOTAL row beneath them.
+  2. Kansas-style: finds all-caps agency headers inside Sec. N. blocks and sums fund-account lines.
+  3. LLM fallback: sends chunked PDF text to Claude Haiku when both pattern passes find nothing.
+     Requires ANTHROPIC_API_KEY in the environment and `pip install anthropic`.
 """
 
 import sys
@@ -46,6 +46,98 @@ YEAR_COL_RE = re.compile(r'\b(20\d\d-\d\d)\b')
 
 def parse_num(s: str) -> float:
     return float(s.replace(',', '').strip())
+
+
+# ---------------------------------------------------------------------------
+# LLM fallback extraction
+# ---------------------------------------------------------------------------
+
+def _extract_llm_fallback(full_text_lines: list, warnings: list) -> tuple:
+    """Send chunked PDF text to Claude Haiku and extract entities + fiscal years."""
+    try:
+        import anthropic
+    except ImportError:
+        warnings.append("LLM fallback skipped: run 'pip install anthropic' to enable it.")
+        return {}, []
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        warnings.append("LLM fallback skipped: set the ANTHROPIC_API_KEY environment variable.")
+        return {}, []
+
+    client = anthropic.Anthropic(api_key=api_key)
+    full_text = '\n'.join(full_text_lines)
+
+    # Chunk into ~80K-char pieces so each fits comfortably in a single Haiku request
+    chunk_size = 80_000
+    chunks = [full_text[i:i + chunk_size] for i in range(0, len(full_text), chunk_size)]
+
+    system_prompt = (
+        "You are a state budget bill analyst. Extract every named agency, department, cabinet, "
+        "or bureau that receives a dollar appropriation from the provided budget bill text.\n\n"
+        "Return ONLY valid JSON — no prose, no markdown code fences:\n"
+        "{\n"
+        '  "fiscal_years": ["2026-27"],\n'
+        '  "entities": {\n'
+        '    "Department Of Education": {"2026-27": 123456789.0},\n'
+        '    "Department Of Transportation": {"2026-27": 98765432.0}\n'
+        "  }\n"
+        "}\n\n"
+        "Rules:\n"
+        "- fiscal_years: fiscal-year labels found in this chunk, formatted YYYY-YY "
+        "(e.g. 2026-27). Derive from any year references in the text.\n"
+        "- entities: Title Case names mapped to {fiscal_year_label: dollar_amount}.\n"
+        "- Dollar amounts are plain floats — no $ signs, no commas. "
+        "If amounts are listed in thousands, multiply by 1000.\n"
+        "- Include only discrete named entities; skip grand-total or rollup lines.\n"
+        "- If no appropriations are found, return {\"fiscal_years\": [], \"entities\": {}}."
+    )
+
+    all_entities: dict = {}
+    all_fiscal_years: list = []
+
+    print(f"  LLM extraction: processing {len(chunks)} chunk(s) with Claude Haiku…")
+    for idx, chunk in enumerate(chunks, 1):
+        try:
+            response = client.messages.create(
+                model="claude-haiku-4-5",
+                max_tokens=4096,
+                cache_control={"type": "ephemeral"},  # caches the system prompt across chunks
+                system=system_prompt,
+                messages=[{
+                    "role": "user",
+                    "content": f"Extract appropriations (chunk {idx}/{len(chunks)}):\n\n{chunk}",
+                }],
+            )
+            raw = next((b.text for b in response.content if b.type == "text"), "")
+            start = raw.find("{")
+            end = raw.rfind("}") + 1
+            if start == -1 or end <= start:
+                continue
+            data = json.loads(raw[start:end])
+
+            for fy in data.get("fiscal_years", []):
+                if fy not in all_fiscal_years:
+                    all_fiscal_years.append(fy)
+
+            for name, amounts in data.get("entities", {}).items():
+                if not isinstance(amounts, dict):
+                    continue
+                if name not in all_entities:
+                    all_entities[name] = {}
+                for fy, amt in amounts.items():
+                    try:
+                        amt = float(amt)
+                    except (TypeError, ValueError):
+                        continue
+                    # Keep the higher figure when the same entity appears in multiple chunks
+                    if fy not in all_entities[name] or amt > all_entities[name][fy]:
+                        all_entities[name][fy] = amt
+
+        except Exception as exc:
+            warnings.append(f"LLM chunk {idx}/{len(chunks)} error: {exc}")
+
+    return all_entities, all_fiscal_years
 
 
 # ---------------------------------------------------------------------------
@@ -181,6 +273,16 @@ def extract_budget_data(pdf_path: str) -> dict:
             for name, total in ks_entities.items():
                 if total >= 10000:
                     entities[name] = {fy_label: total}
+
+    # ---------------------------------------------------------------------------
+    # LLM fallback — only runs when both pattern-based passes found nothing
+    # ---------------------------------------------------------------------------
+    if not entities:
+        llm_entities, llm_fiscal_years = _extract_llm_fallback(full_text_lines, warnings)
+        if llm_entities:
+            entities = llm_entities
+            if llm_fiscal_years:
+                fiscal_years = llm_fiscal_years
 
     # Sort by primary fiscal year descending
     primary_fy = fiscal_years[0] if fiscal_years else 'Total'

@@ -3,8 +3,9 @@
 # Change to the folder this script lives in
 cd "$(dirname "$0")"
 
-# Install dependency if missing
+# Install dependencies if missing
 python3 -c "import pdfplumber" 2>/dev/null || pip3 install pdfplumber
+python3 -c "import anthropic" 2>/dev/null || pip3 install anthropic
 
 echo ""
 echo "================================"
