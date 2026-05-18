@@ -101,7 +101,7 @@ def _extract_llm_fallback(full_text_lines: list, warnings: list) -> tuple:
         try:
             response = client.messages.create(
                 model="claude-haiku-4-5",
-                max_tokens=4096,
+                max_tokens=8192,
                 cache_control={"type": "ephemeral"},  # caches the system prompt across chunks
                 system=system_prompt,
                 messages=[{
