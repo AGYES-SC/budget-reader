@@ -1,2 +1,5 @@
 Reports/
 *.pdf
+__pycache__/
+*.pyc
+.env

@@ -3,8 +3,17 @@
 # Change to the folder this script lives in
 cd "$(dirname "$0")"
 
-# Install dependency if missing
+# Load shell profile so ANTHROPIC_API_KEY set via ~/.zshrc or ~/.bash_profile is available
+source ~/.zshrc 2>/dev/null || source ~/.bash_profile 2>/dev/null || true
+
+# Fall back to a .env file in the same folder if the key still isn't set
+if [ -z "$ANTHROPIC_API_KEY" ] && [ -f "$(dirname "$0")/.env" ]; then
+  export $(grep -v '^#' "$(dirname "$0")/.env" | xargs) 2>/dev/null
+fi
+
+# Install dependencies if missing
 python3 -c "import pdfplumber" 2>/dev/null || pip3 install pdfplumber
+python3 -c "import anthropic" 2>/dev/null || pip3 install anthropic
 
 echo ""
 echo "================================"

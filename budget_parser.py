@@ -1,51 +1,21 @@
 #!/usr/bin/env python3
 """
 State Budget Bill Analyzer
-Extracts agency/department appropriations from a PDF and produces a summary report.
+Extracts agency/department appropriations from a PDF using Claude Haiku,
+then produces a formatted Word document summary report.
 
-Extraction strategy:
-  - Looks for "TOTAL - [ENTITY NAME]" header lines, which mark the authoritative
-    summary for each cabinet, department, or agency in the bill.
-  - Captures the TOTAL row (all-funds combined) for fiscal year columns that follow.
-  - Falls back to a line-by-line TOTAL pattern for documents that lack "TOTAL - X" headers.
+Requires:
+  - ANTHROPIC_API_KEY environment variable
+  - pip install anthropic pdfplumber
 """
 
 import sys
 import os
-import re
 import json
 import subprocess
 from pathlib import Path
 import pdfplumber
-
-
-# ---------------------------------------------------------------------------
-# Patterns
-# ---------------------------------------------------------------------------
-
-# "TOTAL - DEPARTMENT OF EDUCATION" or "TOTAL - GENERAL GOVERNMENT"
-# Requires a letter immediately after the dash to exclude "TOTAL -0-" capital project lines
-TOTAL_HEADER_RE = re.compile(
-    r'TOTAL\s*[-\u2013]\s*([A-Z].+)',
-    re.IGNORECASE
-)
-
-# A TOTAL row with one or more dollar figures on the same line
-# e.g. "           TOTAL                                  6,976,000                6,895,000"
-TOTAL_ROW_RE = re.compile(
-    r'^(?:\d+\s+)?TOTAL\s',
-    re.IGNORECASE
-)
-
-# Plain comma-grouped number
-NUMBER_RE = re.compile(r'[\d]{1,3}(?:,\d{3})+(?:\.\d{1,2})?')
-
-# Fiscal year column header, e.g. "2026-27" or "2027-28"
-YEAR_COL_RE = re.compile(r'\b(20\d\d-\d\d)\b')
-
-
-def parse_num(s: str) -> float:
-    return float(s.replace(',', '').strip())
+import anthropic
 
 
 # ---------------------------------------------------------------------------
@@ -67,93 +37,98 @@ def extract_budget_data(pdf_path: str) -> dict:
             for line in text.split('\n'):
                 full_text_lines.append(line)
 
-    # Detect fiscal year columns from early pages
-    fiscal_years = []
-    for line in full_text_lines[:300]:
-        for y in YEAR_COL_RE.findall(line):
-            if y not in fiscal_years:
-                fiscal_years.append(y)
-        if len(fiscal_years) >= 2:
-            break
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        print("Error: ANTHROPIC_API_KEY is not set.")
+        print("Add it to ~/.zshrc:  export ANTHROPIC_API_KEY=\"sk-ant-...\"")
+        sys.exit(1)
 
-    # Find every "TOTAL - X" block and extract the TOTAL row beneath it
-    entities = {}
-    skip_terms = ['STATE/EXECUTIVE BUDGET', 'PHASE I TOBACCO', 'FUNDS TRANSFER']
+    client = anthropic.Anthropic(api_key=api_key)
+    full_text = '\n'.join(full_text_lines)
 
-    i = 0
-    while i < len(full_text_lines):
-        line = full_text_lines[i]
-        m = TOTAL_HEADER_RE.search(line)
+    # Chunk into ~80K-char pieces so each fits comfortably in a single Haiku request
+    chunk_size = 80_000
+    chunks = [full_text[i:i + chunk_size] for i in range(0, len(full_text), chunk_size)]
 
-        if m:
-            raw_name = m.group(1).strip()
-            # Strip leading line numbers (e.g. "13   STATE/EXECUTIVE BUDGET")
-            raw_name = re.sub(r'^\d+\s+', '', raw_name).strip()
-
-            if any(t in raw_name.upper() for t in skip_terms):
-                i += 1
-                continue
-
-            # Scan next 20 lines for the TOTAL (all-funds) row
-            found = {}
-            for j in range(i + 1, min(i + 20, len(full_text_lines))):
-                scan = full_text_lines[j]
-                if TOTAL_ROW_RE.match(scan):
-                    nums = [n for n in NUMBER_RE.findall(scan) if parse_num(n) > 10000]
-                    if nums and fiscal_years:
-                        # Always take the rightmost N numbers where N = number of fiscal years.
-                        # This safely drops any prior-year columns regardless of how many exist.
-                        nums = nums[-len(fiscal_years):]
-                        for k, fy in enumerate(fiscal_years):
-                            if k < len(nums):
-                                found[fy] = parse_num(nums[k])
-                    elif nums:
-                        found['Total'] = parse_num(nums[-1])
-                    break
-
-            if found:
-                name = raw_name.title()
-                if name in entities:
-                    existing = sum(entities[name].values())
-                    new = sum(found.values())
-                    if new > existing:
-                        entities[name] = found
-                else:
-                    entities[name] = found
-
-        i += 1
-
-    # Sort by primary fiscal year descending
-    primary_fy = fiscal_years[0] if fiscal_years else 'Total'
-    sorted_entities = dict(
-        sorted(entities.items(), key=lambda x: x[1].get(primary_fy, 0), reverse=True)
+    system_prompt = (
+        "You are a state budget bill analyst. Extract every named agency, department, cabinet, "
+        "or bureau that receives a dollar appropriation from the provided budget bill text.\n\n"
+        "Return ONLY valid JSON — no prose, no markdown code fences:\n"
+        "{\n"
+        '  "fiscal_years": ["2026-27"],\n'
+        '  "entities": {\n'
+        '    "Department Of Education": {"2026-27": 123456789.0},\n'
+        '    "Department Of Transportation": {"2026-27": 98765432.0}\n'
+        "  }\n"
+        "}\n\n"
+        "Rules:\n"
+        "- fiscal_years: fiscal-year labels present in this chunk, formatted YYYY-YY "
+        "(e.g. 2026-27). Derive from any year references in the text.\n"
+        "- entities: Title Case names mapped to {fiscal_year_label: dollar_amount}.\n"
+        "- Dollar amounts are plain floats — no $ signs, no commas. "
+        "If the bill lists amounts in thousands, multiply by 1000.\n"
+        "- Include only discrete named entities; skip grand-total or rollup lines.\n"
+        "- If no appropriations are found, return {\"fiscal_years\": [], \"entities\": {}}."
     )
 
-    grand_totals = {}
-    for fy in (fiscal_years or ['Total']):
-        grand_totals[fy] = sum(e.get(fy, 0) for e in sorted_entities.values())
+    all_entities: dict = {}
+    all_fiscal_years: list = []
 
-    # Extract the bill's own stated all-funds grand total from the "TOTAL FUNDS" line
-    bill_grand_totals = {}
-    in_budget_total = False
-    for line in full_text_lines:
-        if re.search(r'TOTAL\s*-\s*STATE/EXECUTIVE BUDGET', line, re.IGNORECASE):
-            in_budget_total = True
-        if in_budget_total and re.search(r'TOTAL FUNDS', line, re.IGNORECASE):
-            nums = [n for n in NUMBER_RE.findall(line) if parse_num(n) > 1_000_000]
-            if nums and fiscal_years:
-                offset = len(nums) - len(fiscal_years)
-                for k, fy in enumerate(fiscal_years):
-                    idx = offset + k
-                    if 0 <= idx < len(nums):
-                        bill_grand_totals[fy] = parse_num(nums[idx])
-            in_budget_total = False
+    print(f"  Extracting with Claude Haiku — {len(chunks)} chunk(s)...")
+    for idx, chunk in enumerate(chunks, 1):
+        try:
+            response = client.messages.create(
+                model="claude-haiku-4-5",
+                max_tokens=8192,
+                cache_control={"type": "ephemeral"},  # caches the system prompt across chunks
+                system=system_prompt,
+                messages=[{
+                    "role": "user",
+                    "content": f"Extract appropriations (chunk {idx}/{len(chunks)}):\n\n{chunk}",
+                }],
+            )
+            raw = next((b.text for b in response.content if b.type == "text"), "")
+            start = raw.find("{")
+            end = raw.rfind("}") + 1
+            if start == -1 or end <= start:
+                continue
+            data = json.loads(raw[start:end])
+
+            for fy in data.get("fiscal_years", []):
+                if fy not in all_fiscal_years:
+                    all_fiscal_years.append(fy)
+
+            for name, amounts in data.get("entities", {}).items():
+                if not isinstance(amounts, dict):
+                    continue
+                if name not in all_entities:
+                    all_entities[name] = {}
+                for fy, amt in amounts.items():
+                    try:
+                        amt = float(amt)
+                    except (TypeError, ValueError):
+                        continue
+                    # Keep the higher figure when the same entity appears in multiple chunks
+                    if fy not in all_entities[name] or amt > all_entities[name][fy]:
+                        all_entities[name][fy] = amt
+
+        except Exception as exc:
+            warnings.append(f"Chunk {idx}/{len(chunks)} error: {exc}")
+
+    fiscal_years = all_fiscal_years or ['Total']
+    primary_fy = fiscal_years[0]
+
+    sorted_entities = dict(
+        sorted(all_entities.items(), key=lambda x: x[1].get(primary_fy, 0), reverse=True)
+    )
+
+    grand_totals = {fy: sum(e.get(fy, 0) for e in sorted_entities.values()) for fy in fiscal_years}
 
     return {
         "entities": sorted_entities,
-        "fiscal_years": fiscal_years or ['Total'],
+        "fiscal_years": fiscal_years,
         "grand_totals": grand_totals,
-        "bill_grand_totals": bill_grand_totals,
+        "bill_grand_totals": {},
         "page_count": page_count,
         "warnings": warnings,
     }
@@ -262,34 +237,6 @@ const totalRow = new TableRow({
   ]
 });
 
-const billTotalRow = Object.keys(data.bill_grand_totals).length > 0
-  ? new TableRow({
-      children: [
-        new TableCell({
-          borders, margins: cm,
-          width: { size: nameWidth, type: WidthType.DXA },
-          shading: { fill: '1F3864', type: ShadingType.CLEAR },
-          children: [new Paragraph({
-            children: [new TextRun({ text: "Bill's Stated All-Funds Total (incl. bonds, transfers, other funds)", bold: true, color: 'FFFFFF', size: 20 })]
-          })]
-        }),
-        ...fys.map(fy => new TableCell({
-          borders, margins: cm,
-          width: { size: fyWidth, type: WidthType.DXA },
-          shading: { fill: '1F3864', type: ShadingType.CLEAR },
-          children: [new Paragraph({
-            alignment: AlignmentType.RIGHT,
-            children: [new TextRun({ text: fmt(data.bill_grand_totals[fy] || 0), bold: true, color: 'FFFFFF', size: 20 })]
-          })]
-        }))
-      ]
-    })
-  : null;
-
-const allRows = billTotalRow
-  ? [headerRow, ...dataRows, totalRow, billTotalRow]
-  : [headerRow, ...dataRows, totalRow];
-
 const warningParagraphs = data.warnings.length > 0
   ? [
       new Paragraph({ spacing: { before: 240 }, children: [new TextRun({ text: 'Notes', bold: true, size: 20 })] }),
@@ -335,18 +282,16 @@ const doc = new Document({
       new Table({
         width: { size: totalWidth, type: WidthType.DXA },
         columnWidths: [nameWidth, ...fys.map(() => fyWidth)],
-        rows: allRows
+        rows: [headerRow, ...dataRows, totalRow]
       }),
       ...warningParagraphs,
       new Paragraph({
         spacing: { before: 300 },
         children: [new TextRun({
-          text: 'Methodology: "Total — Named Entity Appropriations" is drawn exclusively from "TOTAL - [Entity]" ' +
-                'summary lines, representing discrete all-funds appropriations to named cabinets, departments, ' +
-                'and agencies. Line-item and sub-unit figures are excluded to prevent double-counting. ' +
-                'The bill\'s Stated All-Funds Total is taken from the "TOTAL FUNDS" line in the bill\'s own ' +
-                'grand summary and includes bond proceeds, intergovernmental transfers, investment income, ' +
-                'and other funds not attributed to named entities. Verify against the enrolled bill before citing.',
+          text: 'Methodology: Appropriations were extracted from the source PDF using AI (Claude Haiku). ' +
+                'Each named agency, department, cabinet, or bureau is listed with its all-funds appropriation ' +
+                'for the identified fiscal year(s). Grand-total and rollup lines are excluded to prevent ' +
+                'double-counting. Verify all figures against the enrolled bill before citing.',
           size: 16, color: '888888', italics: true
         })]
       }),
@@ -392,7 +337,6 @@ def main():
 
     pdf_path = sys.argv[1]
 
-    # Default output: Reports/ folder next to this script
     reports_dir = Path(__file__).parent / "Reports"
     reports_dir.mkdir(exist_ok=True)
     out_path = sys.argv[2] if len(sys.argv) > 2 else str(reports_dir / (Path(pdf_path).stem + "_summary.docx"))
@@ -407,13 +351,13 @@ def main():
     print(f"\nFound {len(data['entities'])} budget entities")
     print(f"Fiscal years: {', '.join(data['fiscal_years'])}")
     for fy in data['fiscal_years']:
-        print(f"Grand total {fy}: ${data['grand_totals'].get(fy, 0):,.0f}")
+        print(f"Total {fy}: ${data['grand_totals'].get(fy, 0):,.0f}")
     if data['warnings']:
         print(f"\nWarnings ({len(data['warnings'])}):")
         for w in data['warnings']:
             print(f"  - {w}")
 
-    print(f"\nGenerating report → {out_path}")
+    print(f"\nGenerating report -> {out_path}")
     generate_report(data, pdf_path, out_path)
     print("Done.")
 
