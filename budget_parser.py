@@ -392,7 +392,6 @@ def main():
 
     pdf_path = sys.argv[1]
 
-    # Default output: Reports/ folder next to this script
     reports_dir = Path(__file__).parent / "Reports"
     reports_dir.mkdir(exist_ok=True)
     out_path = sys.argv[2] if len(sys.argv) > 2 else str(reports_dir / (Path(pdf_path).stem + "_summary.docx"))
@@ -407,13 +406,16 @@ def main():
     print(f"\nFound {len(data['entities'])} budget entities")
     print(f"Fiscal years: {', '.join(data['fiscal_years'])}")
     for fy in data['fiscal_years']:
-        print(f"Grand total {fy}: ${data['grand_totals'].get(fy, 0):,.0f}")
+        print(f"Named entity total {fy}: ${data['grand_totals'].get(fy, 0):,.0f}")
+    if data['bill_grand_totals']:
+        for fy in data['fiscal_years']:
+            print(f"Bill all-funds total {fy}: ${data['bill_grand_totals'].get(fy, 0):,.0f}")
     if data['warnings']:
         print(f"\nWarnings ({len(data['warnings'])}):")
         for w in data['warnings']:
             print(f"  - {w}")
 
-    print(f"\nGenerating report → {out_path}")
+    print(f"\nGenerating report -> {out_path}")
     generate_report(data, pdf_path, out_path)
     print("Done.")
 
