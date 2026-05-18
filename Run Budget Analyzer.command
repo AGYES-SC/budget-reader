@@ -11,16 +11,21 @@ echo "================================"
 echo "  State Budget Bill Analyzer"
 echo "================================"
 echo ""
-echo "Drag your PDF into this window and press Enter:"
-read -r pdf_path
+echo "Opening file picker — select your PDF file..."
+pdf_path=$(osascript -e 'tell application "Finder"
+  activate
+end tell
+tell application "System Events"
+  set chosenFile to (choose file with prompt "Select a Budget PDF" of type {"pdf", "com.adobe.pdf"})
+  return POSIX path of chosenFile
+end tell' 2>/dev/null)
 
-# Strip surrounding quotes (in case user drags file in)
-pdf_path="${pdf_path%\'}"
-pdf_path="${pdf_path#\'}"
-pdf_path="${pdf_path%\"}"
-pdf_path="${pdf_path#\"}"
-# Trim whitespace
-pdf_path="$(echo "$pdf_path" | xargs)"
+if [ -z "$pdf_path" ]; then
+  echo ""
+  echo "No file selected. Press Enter to exit."
+  read -r
+  exit 1
+fi
 
 if [ ! -f "$pdf_path" ]; then
   echo ""
