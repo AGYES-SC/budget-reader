@@ -20,38 +20,29 @@ echo "================================"
 echo "  State Budget Bill Analyzer"
 echo "================================"
 echo ""
+echo "Opening file picker — select your PDF..."
+echo ""
 
-# Warn (don't block) if the API key is missing — pattern extraction still works without it
-if [ -z "$ANTHROPIC_API_KEY" ]; then
-  echo "⚠️  ANTHROPIC_API_KEY is not set."
-  echo "   Pattern-based extraction will still run."
-  echo "   To enable the AI fallback, see setup instructions in README.md."
-  echo ""
-fi
-echo "Opening file picker — select your PDF file..."
-pdf_path=$(osascript -e 'tell application "Finder"
-  activate
-end tell
-tell application "System Events"
-  set chosenFile to (choose file with prompt "Select a Budget PDF" of type {"pdf", "com.adobe.pdf"})
-  return POSIX path of chosenFile
-end tell' 2>/dev/null)
+pdf_path=$(osascript << 'APPLESCRIPT'
+choose file with prompt "Select a Budget PDF"
+POSIX path of result
+APPLESCRIPT
+)
 
 if [ -z "$pdf_path" ]; then
-  echo ""
   echo "No file selected. Press Enter to exit."
   read -r
   exit 1
 fi
 
 if [ ! -f "$pdf_path" ]; then
-  echo ""
   echo "Error: file not found — $pdf_path"
   echo "Press Enter to exit."
   read -r
   exit 1
 fi
 
+echo "Selected: $pdf_path"
 echo ""
 echo "Running analysis..."
 echo ""
