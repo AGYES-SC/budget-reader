@@ -123,6 +123,65 @@ def extract_budget_data(pdf_path: str) -> dict:
 
         i += 1
 
+    # ---------------------------------------------------------------------------
+    # Kansas-style fallback extraction
+    # Runs only when the Kentucky-style pass found nothing.
+    # Kansas bills list per-agency fund account lines (no TOTAL summary rows).
+    # ---------------------------------------------------------------------------
+    if not entities:
+        full_text = '\n'.join(full_text_lines)
+
+        # Step 1 — detect primary fiscal year from "fiscal year ending June 30, YYYY"
+        fy_year_counts: dict = {}
+        for m in re.finditer(r'fiscal year ending June 30,\s*(\d{4})', full_text, re.IGNORECASE):
+            yr = int(m.group(1))
+            fy_year_counts[yr] = fy_year_counts.get(yr, 0) + 1
+
+        if fy_year_counts:
+            target_year = max(fy_year_counts, key=fy_year_counts.get)
+            fy_label = f"{target_year - 1}-{str(target_year)[2:]}"
+            fiscal_years = [fy_label]
+            target_fy_str = f"fiscal year ending June 30, {target_year}"
+
+            # Step 2 — split into section blocks on "Sec. N." boundaries
+            blocks = re.split(r'\n\sSec\.\s\d+\.', full_text)
+
+            kansas_agency_re = re.compile(r'^[A-Z][A-Z &\-]{4,}$')
+            amount_re = re.compile(r'\.\s*\$\s*([\d,]+(?:\.\d{1,2})?)')
+
+            # Steps 3–4 — parse each block and accumulate per agency
+            ks_entities: dict = {}
+            for block in blocks:
+                if target_fy_str.lower() not in block.lower():
+                    continue
+
+                agency_name = None
+                for bline in block.splitlines():
+                    bline_stripped = bline.strip()
+                    if kansas_agency_re.match(bline_stripped) and len(bline_stripped) >= 6:
+                        agency_name = bline_stripped.title()
+                        break
+
+                if not agency_name:
+                    continue
+
+                block_total = 0.0
+                for bline in block.splitlines():
+                    if 'no limit' in bline.lower():
+                        continue
+                    for amt_str in amount_re.findall(bline):
+                        amt = parse_num(amt_str)
+                        if amt >= 1000:
+                            block_total += amt
+
+                if block_total > 0:
+                    ks_entities[agency_name] = ks_entities.get(agency_name, 0.0) + block_total
+
+            # Step 5 — filter, wrap in fiscal-year dict, sort descending
+            for name, total in ks_entities.items():
+                if total >= 10000:
+                    entities[name] = {fy_label: total}
+
     # Sort by primary fiscal year descending
     primary_fy = fiscal_years[0] if fiscal_years else 'Total'
     sorted_entities = dict(
