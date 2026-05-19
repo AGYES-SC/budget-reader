@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 State Budget Bill Analyzer
-Extracts agency/department appropriations from a PDF using OpenAI GPT-4o Mini,
+Extracts agency/department appropriations from a PDF using OpenAI GPT-4o,
 then produces a formatted Word document summary report.
 
 Requires:
@@ -53,12 +53,16 @@ def extract_budget_data(pdf_path: str) -> dict:
     system_prompt = (
         "You are a state budget bill analyst. Extract every named agency, department, cabinet, "
         "or bureau that receives a dollar appropriation from the provided budget bill text.\n\n"
-        "Return ONLY valid JSON — no prose, no markdown code fences:\n"
+        "Return ONLY valid JSON in exactly this shape:\n"
         "{\n"
         '  "fiscal_years": ["2026-27"],\n'
         '  "entities": {\n'
         '    "Department Of Education": {"2026-27": 123456789.0},\n'
         '    "Department Of Transportation": {"2026-27": 98765432.0}\n'
+        "  },\n"
+        '  "fund_sources": {\n'
+        '    "Department Of Education": "General Fund",\n'
+        '    "Department Of Transportation": "State Highway Fund"\n'
         "  }\n"
         "}\n\n"
         "Rules:\n"
@@ -67,12 +71,17 @@ def extract_budget_data(pdf_path: str) -> dict:
         "- entities: Title Case names mapped to {fiscal_year_label: dollar_amount}.\n"
         "- Dollar amounts are plain floats — no $ signs, no commas. "
         "If the bill lists amounts in thousands, multiply by 1000.\n"
+        "- fund_sources: map each entity to its primary funding source exactly as named in the "
+        "bill (e.g. 'General Fund', 'Federal Funds', 'Capital Projects', 'Special Revenue', "
+        "'Highway Fund'). Use 'General Fund' if unspecified.\n"
         "- Include only discrete named entities; skip grand-total or rollup lines.\n"
-        "- If no appropriations are found, return {\"fiscal_years\": [], \"entities\": {}}."
+        "- If no appropriations are found, return "
+        '{"fiscal_years": [], "entities": {}, "fund_sources": {}}.'
     )
 
     all_entities: dict = {}
     all_fiscal_years: list = []
+    all_fund_sources: dict = {}
 
     print(f"  Extracting with GPT-4o — {len(chunks)} chunk(s)...")
     for idx, chunk in enumerate(chunks, 1):
@@ -80,19 +89,14 @@ def extract_budget_data(pdf_path: str) -> dict:
             response = client.chat.completions.create(
                 model="gpt-4o",
                 max_tokens=8192,
+                response_format={"type": "json_object"},
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": f"Extract appropriations (chunk {idx}/{len(chunks)}):\n\n{chunk}"},
                 ],
             )
             raw = response.choices[0].message.content or ""
-            start = raw.find("{")
-            end = raw.rfind("}") + 1
-            if start == -1 or end <= start:
-                continue
-            import re
-            cleaned = re.sub(r',\s*([}\]])', r'\1', raw[start:end])
-            data = json.loads(cleaned)
+            data = json.loads(raw)
 
             for fy in data.get("fiscal_years", []):
                 if fy not in all_fiscal_years:
@@ -112,6 +116,10 @@ def extract_budget_data(pdf_path: str) -> dict:
                     if fy not in all_entities[name] or amt > all_entities[name][fy]:
                         all_entities[name][fy] = amt
 
+            for name, source in data.get("fund_sources", {}).items():
+                if name not in all_fund_sources and isinstance(source, str):
+                    all_fund_sources[name] = source
+
         except Exception as exc:
             warnings.append(f"Chunk {idx}/{len(chunks)} error: {exc}")
 
@@ -128,6 +136,7 @@ def extract_budget_data(pdf_path: str) -> dict:
         "entities": sorted_entities,
         "fiscal_years": fiscal_years,
         "grand_totals": grand_totals,
+        "fund_sources": all_fund_sources,
         "bill_grand_totals": {},
         "page_count": page_count,
         "warnings": warnings,
@@ -147,6 +156,7 @@ const {
 
 const data = JSON.parse(fs.readFileSync('/tmp/budget_data.json', 'utf8'));
 const fys = data.fiscal_years;
+const fundSources = data.fund_sources || {};
 
 function fmt(n) {
   if (!n || n === 0) return '-';
@@ -157,28 +167,18 @@ const border = { style: BorderStyle.SINGLE, size: 1, color: 'CCCCCC' };
 const borders = { top: border, bottom: border, left: border, right: border };
 const cm = { top: 80, bottom: 80, left: 120, right: 120 };
 
-const nameWidth = fys.length > 1 ? 5040 : 6240;
-const fyWidth   = fys.length > 1 ? Math.floor(4320 / fys.length) : 3120;
-const totalWidth = nameWidth + fyWidth * fys.length;
+const nameWidth   = 3600;
+const sourceWidth = 1680;
+const fyWidth     = fys.length > 1 ? Math.floor(4080 / fys.length) : 4080;
+const totalWidth  = nameWidth + sourceWidth + fyWidth * fys.length;
 
-function headerCell(text, width) {
+function headerCell(text, width, align) {
   return new TableCell({
     borders, margins: cm,
     width: { size: width, type: WidthType.DXA },
     shading: { fill: '1F3864', type: ShadingType.CLEAR },
     children: [new Paragraph({
-      alignment: AlignmentType.RIGHT,
-      children: [new TextRun({ text, bold: true, color: 'FFFFFF', size: 20 })]
-    })]
-  });
-}
-
-function nameHeaderCell(text, width) {
-  return new TableCell({
-    borders, margins: cm,
-    width: { size: width, type: WidthType.DXA },
-    shading: { fill: '1F3864', type: ShadingType.CLEAR },
-    children: [new Paragraph({
+      alignment: align || AlignmentType.RIGHT,
       children: [new TextRun({ text, bold: true, color: 'FFFFFF', size: 20 })]
     })]
   });
@@ -187,13 +187,15 @@ function nameHeaderCell(text, width) {
 const headerRow = new TableRow({
   tableHeader: true,
   children: [
-    nameHeaderCell('Agency / Cabinet / Department', nameWidth),
+    headerCell('Agency / Cabinet / Department', nameWidth, AlignmentType.LEFT),
+    headerCell('Fund Source', sourceWidth, AlignmentType.LEFT),
     ...fys.map(fy => headerCell(fy, fyWidth))
   ]
 });
 
 const dataRows = Object.entries(data.entities).map(([name, totals], i) => {
   const fill = i % 2 === 0 ? 'F5F7FA' : 'FFFFFF';
+  const source = fundSources[name] || '';
   return new TableRow({
     children: [
       new TableCell({
@@ -201,6 +203,12 @@ const dataRows = Object.entries(data.entities).map(([name, totals], i) => {
         width: { size: nameWidth, type: WidthType.DXA },
         shading: { fill, type: ShadingType.CLEAR },
         children: [new Paragraph({ children: [new TextRun({ text: name, size: 18 })] })]
+      }),
+      new TableCell({
+        borders, margins: cm,
+        width: { size: sourceWidth, type: WidthType.DXA },
+        shading: { fill, type: ShadingType.CLEAR },
+        children: [new Paragraph({ children: [new TextRun({ text: source, size: 16, italics: true, color: '444444' })] })]
       }),
       ...fys.map(fy => new TableCell({
         borders, margins: cm,
@@ -224,6 +232,12 @@ const totalRow = new TableRow({
       children: [new Paragraph({
         children: [new TextRun({ text: 'Total — Named Entity Appropriations', bold: true, size: 20 })]
       })]
+    }),
+    new TableCell({
+      borders, margins: cm,
+      width: { size: sourceWidth, type: WidthType.DXA },
+      shading: { fill: 'D9E1F2', type: ShadingType.CLEAR },
+      children: [new Paragraph({ children: [new TextRun({ text: '' })] })]
     }),
     ...fys.map(fy => new TableCell({
       borders, margins: cm,
@@ -281,14 +295,14 @@ const doc = new Document({
       }),
       new Table({
         width: { size: totalWidth, type: WidthType.DXA },
-        columnWidths: [nameWidth, ...fys.map(() => fyWidth)],
+        columnWidths: [nameWidth, sourceWidth, ...fys.map(() => fyWidth)],
         rows: [headerRow, ...dataRows, totalRow]
       }),
       ...warningParagraphs,
       new Paragraph({
         spacing: { before: 300 },
         children: [new TextRun({
-          text: 'Methodology: Appropriations were extracted from the source PDF using AI (GPT-4o Mini). ' +
+          text: 'Methodology: Appropriations were extracted from the source PDF using AI (GPT-4o). ' +
                 'Each named agency, department, cabinet, or bureau is listed with its all-funds appropriation ' +
                 'for the identified fiscal year(s). Grand-total and rollup lines are excluded to prevent ' +
                 'double-counting. Verify all figures against the enrolled bill before citing.',
