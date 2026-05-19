@@ -52,40 +52,40 @@ def extract_budget_data(pdf_path: str) -> dict:
     chunks = [full_text[i:i + chunk_size] for i in range(0, len(full_text), chunk_size)]
 
     system_prompt = (
-        "You are a state budget bill analyst. Extract agency/department appropriations from "
-        "the provided budget bill text.\n\n"
+        "You are a state budget bill analyst. Extract appropriations from the provided budget "
+        "bill text following these exact rules:\n\n"
+        "NON-EDUCATION AGENCIES: Include every named agency, department, cabinet, or bureau "
+        "that is NOT education-related. Include exactly ONE row per agency showing its total "
+        "appropriation. Do not include sub-items or line items for these agencies. Do not skip "
+        "any non-education agency.\n\n"
+        "EDUCATION AGENCIES: For any appropriation related to education (K-12, school districts, "
+        "universities, colleges, community colleges, vocational education, Board of Education, "
+        "Department of Education, or any education program), list EVERY individual line item as "
+        "a separate row. Do NOT include the parent agency total — only the individual line items "
+        "(to avoid double-counting). Name each line item as "
+        "'Parent Agency — Line Item' (e.g. 'Department Of Education — Special Education', "
+        "'University Of Kansas — General Operations').\n\n"
         "Return ONLY valid JSON in exactly this shape:\n"
         "{\n"
         '  "fiscal_years": ["2026-27"],\n'
         '  "entities": {\n'
+        '    "Department Of Transportation": {"2026-27": 98765432.0},\n'
         '    "Department Of Education — Special Education": {"2026-27": 45000000.0},\n'
-        '    "Department Of Transportation": {"2026-27": 98765432.0}\n'
+        '    "Department Of Education — Elementary Education": {"2026-27": 32000000.0}\n'
         "  },\n"
         '  "fund_sources": {\n'
+        '    "Department Of Transportation": "State Highway Fund",\n'
         '    "Department Of Education — Special Education": "General Fund",\n'
-        '    "Department Of Transportation": "State Highway Fund"\n'
+        '    "Department Of Education — Elementary Education": "General Fund"\n'
         "  }\n"
         "}\n\n"
-        "Rules:\n"
-        "- fiscal_years: fiscal-year labels present in this chunk, formatted YYYY-YY "
-        "(e.g. 2026-27). Derive from any year references in the text.\n"
-        "- entities: Title Case names mapped to {fiscal_year_label: dollar_amount}.\n"
-        "- Dollar amounts are plain floats — no $ signs, no commas. "
-        "If the bill lists amounts in thousands, multiply by 1000.\n"
-        "- fund_sources: map each entity to its primary funding source exactly as named in the "
-        "bill (e.g. 'General Fund', 'Federal Funds', 'Capital Projects', 'Special Revenue', "
-        "'Highway Fund'). Use 'General Fund' if unspecified.\n"
-        "- EDUCATION LINES (critical): For any appropriation related to education — including "
-        "K-12 schools, school districts, universities, colleges, community colleges, vocational "
-        "education, Board of Education, Department of Education, higher education institutions, "
-        "or any education program — list EVERY individual line item as its own separate entity. "
-        "Do NOT roll up or combine education appropriations into a single total. Use the format "
-        "'Parent Agency — Line Item Name' (e.g. 'Department Of Education — Special Education', "
-        "'University Of Kansas — General Operations'). Each individual program, institution, or "
-        "appropriation line within education must appear as its own row.\n"
-        "- For all non-education agencies a single total per named entity is acceptable.\n"
-        "- Skip grand-total or rollup lines for non-education entities.\n"
-        "- If no appropriations are found, return "
+        "Additional rules:\n"
+        "- fiscal_years: labels formatted YYYY-YY (e.g. 2026-27).\n"
+        "- Entity names in Title Case.\n"
+        "- Dollar amounts are plain floats, no $ or commas. "
+        "If amounts are listed in thousands, multiply by 1000.\n"
+        "- fund_sources: use the exact fund name from the bill. Default to 'General Fund'.\n"
+        "- If no appropriations found, return "
         '{"fiscal_years": [], "entities": {}, "fund_sources": {}}.'
     )
 
