@@ -130,19 +130,15 @@ def extract_budget_data(pdf_path: str) -> dict:
     primary_fy = fiscal_years[0]
 
     # Drop entities where every fiscal year amount is zero (unreadable amounts)
-    all_entities = {
+    ordered_entities = {
         name: amts for name, amts in all_entities.items()
         if any(v > 0 for v in amts.values())
     }
 
-    sorted_entities = dict(
-        sorted(all_entities.items(), key=lambda x: x[1].get(primary_fy, 0), reverse=True)
-    )
-
-    grand_totals = {fy: sum(e.get(fy, 0) for e in sorted_entities.values()) for fy in fiscal_years}
+    grand_totals = {fy: sum(e.get(fy, 0) for e in ordered_entities.values()) for fy in fiscal_years}
 
     return {
-        "entities": sorted_entities,
+        "entities": ordered_entities,
         "fiscal_years": fiscal_years,
         "grand_totals": grand_totals,
         "fund_sources": all_fund_sources,
