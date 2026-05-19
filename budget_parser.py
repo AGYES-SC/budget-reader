@@ -52,17 +52,17 @@ def extract_budget_data(pdf_path: str) -> dict:
     chunks = [full_text[i:i + chunk_size] for i in range(0, len(full_text), chunk_size)]
 
     system_prompt = (
-        "You are a state budget bill analyst. Extract every named agency, department, cabinet, "
-        "or bureau that receives a dollar appropriation from the provided budget bill text.\n\n"
+        "You are a state budget bill analyst. Extract agency/department appropriations from "
+        "the provided budget bill text.\n\n"
         "Return ONLY valid JSON in exactly this shape:\n"
         "{\n"
         '  "fiscal_years": ["2026-27"],\n'
         '  "entities": {\n'
-        '    "Department Of Education": {"2026-27": 123456789.0},\n'
+        '    "Department Of Education — Special Education": {"2026-27": 45000000.0},\n'
         '    "Department Of Transportation": {"2026-27": 98765432.0}\n'
         "  },\n"
         '  "fund_sources": {\n'
-        '    "Department Of Education": "General Fund",\n'
+        '    "Department Of Education — Special Education": "General Fund",\n'
         '    "Department Of Transportation": "State Highway Fund"\n'
         "  }\n"
         "}\n\n"
@@ -75,7 +75,16 @@ def extract_budget_data(pdf_path: str) -> dict:
         "- fund_sources: map each entity to its primary funding source exactly as named in the "
         "bill (e.g. 'General Fund', 'Federal Funds', 'Capital Projects', 'Special Revenue', "
         "'Highway Fund'). Use 'General Fund' if unspecified.\n"
-        "- Include only discrete named entities; skip grand-total or rollup lines.\n"
+        "- EDUCATION LINES (critical): For any appropriation related to education — including "
+        "K-12 schools, school districts, universities, colleges, community colleges, vocational "
+        "education, Board of Education, Department of Education, higher education institutions, "
+        "or any education program — list EVERY individual line item as its own separate entity. "
+        "Do NOT roll up or combine education appropriations into a single total. Use the format "
+        "'Parent Agency — Line Item Name' (e.g. 'Department Of Education — Special Education', "
+        "'University Of Kansas — General Operations'). Each individual program, institution, or "
+        "appropriation line within education must appear as its own row.\n"
+        "- For all non-education agencies a single total per named entity is acceptable.\n"
+        "- Skip grand-total or rollup lines for non-education entities.\n"
         "- If no appropriations are found, return "
         '{"fiscal_years": [], "entities": {}, "fund_sources": {}}.'
     )
@@ -198,8 +207,11 @@ const headerRow = new TableRow({
   ]
 });
 
+const EDU_KEYWORDS = /education|school|university|college|vocational|k-12|higher ed/i;
+
 const dataRows = Object.entries(data.entities).map(([name, totals], i) => {
-  const fill = i % 2 === 0 ? 'F5F7FA' : 'FFFFFF';
+  const isEdu = EDU_KEYWORDS.test(name);
+  const fill = isEdu ? 'FFF8E7' : (i % 2 === 0 ? 'F5F7FA' : 'FFFFFF');
   const source = fundSources[name] || '';
   return new TableRow({
     children: [
