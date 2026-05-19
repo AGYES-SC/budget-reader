@@ -14,6 +14,7 @@ import os
 import json
 import subprocess
 from pathlib import Path
+from datetime import datetime
 import pdfplumber
 import openai
 
@@ -353,7 +354,8 @@ def main():
 
     reports_dir = Path(__file__).parent / "Reports"
     reports_dir.mkdir(exist_ok=True)
-    out_path = sys.argv[2] if len(sys.argv) > 2 else str(reports_dir / (Path(pdf_path).stem + "_summary.docx"))
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_path = sys.argv[2] if len(sys.argv) > 2 else str(reports_dir / (Path(pdf_path).stem + f"_summary_{timestamp}.docx"))
 
     if not Path(pdf_path).exists():
         print(f"Error: file not found — {pdf_path}")
