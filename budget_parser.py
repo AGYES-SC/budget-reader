@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
 State Budget Bill Analyzer
-Extracts agency/department appropriations from a PDF using Claude Haiku,
+Extracts agency/department appropriations from a PDF using OpenAI GPT-4o Mini,
 then produces a formatted Word document summary report.
 
 Requires:
-  - ANTHROPIC_API_KEY environment variable
-  - pip install anthropic pdfplumber
+  - OPENAI_API_KEY environment variable
+  - pip install openai pdfplumber
 """
 
 import sys
@@ -15,7 +15,7 @@ import json
 import subprocess
 from pathlib import Path
 import pdfplumber
-import anthropic
+import openai
 
 
 # ---------------------------------------------------------------------------
@@ -37,16 +37,16 @@ def extract_budget_data(pdf_path: str) -> dict:
             for line in text.split('\n'):
                 full_text_lines.append(line)
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
-        print("Error: ANTHROPIC_API_KEY is not set.")
-        print("Add it to ~/.zshrc:  export ANTHROPIC_API_KEY=\"sk-ant-...\"")
+        print("Error: OPENAI_API_KEY is not set.")
+        print("Add it to ~/.zshrc:  export OPENAI_API_KEY=\"sk-...\"")
         sys.exit(1)
 
-    client = anthropic.Anthropic(api_key=api_key)
+    client = openai.OpenAI(api_key=api_key)
     full_text = '\n'.join(full_text_lines)
 
-    # Chunk into ~80K-char pieces so each fits comfortably in a single Haiku request
+    # Chunk into ~80K-char pieces so each fits comfortably in a single request
     chunk_size = 80_000
     chunks = [full_text[i:i + chunk_size] for i in range(0, len(full_text), chunk_size)]
 
@@ -74,20 +74,18 @@ def extract_budget_data(pdf_path: str) -> dict:
     all_entities: dict = {}
     all_fiscal_years: list = []
 
-    print(f"  Extracting with Claude Haiku — {len(chunks)} chunk(s)...")
+    print(f"  Extracting with GPT-4o Mini — {len(chunks)} chunk(s)...")
     for idx, chunk in enumerate(chunks, 1):
         try:
-            response = client.messages.create(
-                model="claude-haiku-4-5",
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
                 max_tokens=8192,
-                cache_control={"type": "ephemeral"},  # caches the system prompt across chunks
-                system=system_prompt,
-                messages=[{
-                    "role": "user",
-                    "content": f"Extract appropriations (chunk {idx}/{len(chunks)}):\n\n{chunk}",
-                }],
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"Extract appropriations (chunk {idx}/{len(chunks)}):\n\n{chunk}"},
+                ],
             )
-            raw = next((b.text for b in response.content if b.type == "text"), "")
+            raw = response.choices[0].message.content or ""
             start = raw.find("{")
             end = raw.rfind("}") + 1
             if start == -1 or end <= start:
@@ -288,7 +286,7 @@ const doc = new Document({
       new Paragraph({
         spacing: { before: 300 },
         children: [new TextRun({
-          text: 'Methodology: Appropriations were extracted from the source PDF using AI (Claude Haiku). ' +
+          text: 'Methodology: Appropriations were extracted from the source PDF using AI (GPT-4o Mini). ' +
                 'Each named agency, department, cabinet, or bureau is listed with its all-funds appropriation ' +
                 'for the identified fiscal year(s). Grand-total and rollup lines are excluded to prevent ' +
                 'double-counting. Verify all figures against the enrolled bill before citing.',
