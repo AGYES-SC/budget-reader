@@ -90,6 +90,8 @@ def extract_budget_data(pdf_path: str) -> dict:
             response = client.chat.completions.create(
                 model="gpt-4o",
                 max_tokens=8192,
+                temperature=0,
+                seed=42,
                 response_format={"type": "json_object"},
                 messages=[
                     {"role": "system", "content": system_prompt},
