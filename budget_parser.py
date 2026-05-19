@@ -129,6 +129,12 @@ def extract_budget_data(pdf_path: str) -> dict:
     fiscal_years = all_fiscal_years or ['Total']
     primary_fy = fiscal_years[0]
 
+    # Drop entities where every fiscal year amount is zero (unreadable amounts)
+    all_entities = {
+        name: amts for name, amts in all_entities.items()
+        if any(v > 0 for v in amts.values())
+    }
+
     sorted_entities = dict(
         sorted(all_entities.items(), key=lambda x: x[1].get(primary_fy, 0), reverse=True)
     )
@@ -363,8 +369,17 @@ def main():
         print(f"Error: file not found — {pdf_path}")
         sys.exit(1)
 
+    cache_path = reports_dir / (Path(pdf_path).stem + "_extraction.json")
+
     print(f"Analyzing: {pdf_path}")
-    data = extract_budget_data(pdf_path)
+    if cache_path.exists():
+        print(f"  Using cached extraction — delete {cache_path.name} to re-run AI extraction")
+        with open(cache_path) as f:
+            data = json.load(f)
+    else:
+        data = extract_budget_data(pdf_path)
+        with open(cache_path, 'w') as f:
+            json.dump(data, f, indent=2)
 
     print(f"\nFound {len(data['entities'])} budget entities")
     print(f"Fiscal years: {', '.join(data['fiscal_years'])}")
