@@ -74,11 +74,11 @@ def extract_budget_data(pdf_path: str) -> dict:
     all_entities: dict = {}
     all_fiscal_years: list = []
 
-    print(f"  Extracting with GPT-4o Mini — {len(chunks)} chunk(s)...")
+    print(f"  Extracting with GPT-4o — {len(chunks)} chunk(s)...")
     for idx, chunk in enumerate(chunks, 1):
         try:
             response = client.chat.completions.create(
-                model="gpt-4o-mini",
+                model="gpt-4o",
                 max_tokens=8192,
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -90,7 +90,10 @@ def extract_budget_data(pdf_path: str) -> dict:
             end = raw.rfind("}") + 1
             if start == -1 or end <= start:
                 continue
-            data = json.loads(raw[start:end])
+            # Strip trailing commas before closing braces/brackets (common LLM mistake)
+            import re
+            cleaned = re.sub(r',\s*([}\]])', r'\1', raw[start:end])
+            data = json.loads(cleaned)
 
             for fy in data.get("fiscal_years", []):
                 if fy not in all_fiscal_years:
@@ -286,7 +289,7 @@ const doc = new Document({
       new Paragraph({
         spacing: { before: 300 },
         children: [new TextRun({
-          text: 'Methodology: Appropriations were extracted from the source PDF using AI (GPT-4o Mini). ' +
+          text: 'Methodology: Appropriations were extracted from the source PDF using AI (GPT-4o). ' +
                 'Each named agency, department, cabinet, or bureau is listed with its all-funds appropriation ' +
                 'for the identified fiscal year(s). Grand-total and rollup lines are excluded to prevent ' +
                 'double-counting. Verify all figures against the enrolled bill before citing.',
