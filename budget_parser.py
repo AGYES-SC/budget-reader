@@ -60,10 +60,6 @@ def extract_budget_data(pdf_path: str) -> dict:
         '  "entities": {\n'
         '    "Department Of Education": {"2026-27": 123456789.0},\n'
         '    "Department Of Transportation": {"2026-27": 98765432.0}\n'
-        "  },\n"
-        '  "fund_sources": {\n'
-        '    "Department Of Education": "General Fund",\n'
-        '    "Department Of Transportation": "State Highway Fund"\n'
         "  }\n"
         "}\n\n"
         "Rules:\n"
@@ -73,17 +69,13 @@ def extract_budget_data(pdf_path: str) -> dict:
         "{fiscal_year_label: total_dollar_amount}. Do not break agencies into sub-items.\n"
         "- Dollar amounts are plain floats — no $ signs, no commas. "
         "If the bill lists amounts in thousands, multiply by 1000.\n"
-        "- fund_sources: map each entity to its primary funding source exactly as named in the "
-        "bill (e.g. 'General Fund', 'Federal Funds', 'Capital Projects', 'Special Revenue', "
-        "'Highway Fund'). Use 'General Fund' if unspecified.\n"
         "- Include only discrete named entities; skip grand-total or rollup lines.\n"
         "- If no appropriations are found, return "
-        '{"fiscal_years": [], "entities": {}, "fund_sources": {}}.'
+        '{"fiscal_years": [], "entities": {}}.'
     )
 
     all_entities: dict = {}
     all_fiscal_years: list = []
-    all_fund_sources: dict = {}
 
     print(f"  Extracting with GPT-4o — {len(chunks)} chunk(s)...")
     for idx, chunk in enumerate(chunks, 1):
@@ -120,10 +112,6 @@ def extract_budget_data(pdf_path: str) -> dict:
                     if fy not in all_entities[name] or amt > all_entities[name][fy]:
                         all_entities[name][fy] = amt
 
-            for name, source in data.get("fund_sources", {}).items():
-                if name not in all_fund_sources and isinstance(source, str):
-                    all_fund_sources[name] = source
-
         except Exception as exc:
             warnings.append(f"Chunk {idx}/{len(chunks)} error: {exc}")
 
@@ -142,7 +130,6 @@ def extract_budget_data(pdf_path: str) -> dict:
         "entities": ordered_entities,
         "fiscal_years": fiscal_years,
         "grand_totals": grand_totals,
-        "fund_sources": all_fund_sources,
         "bill_grand_totals": {},
         "page_count": page_count,
         "warnings": warnings,
@@ -162,7 +149,6 @@ const {
 
 const data = JSON.parse(fs.readFileSync('/tmp/budget_data.json', 'utf8'));
 const fys = data.fiscal_years;
-const fundSources = data.fund_sources || {};
 
 function fmt(n) {
   if (!n || n === 0) return '-';
@@ -173,10 +159,9 @@ const border = { style: BorderStyle.SINGLE, size: 1, color: 'CCCCCC' };
 const borders = { top: border, bottom: border, left: border, right: border };
 const cm = { top: 80, bottom: 80, left: 120, right: 120 };
 
-const nameWidth   = 3600;
-const sourceWidth = 1680;
-const fyWidth     = fys.length > 1 ? Math.floor(4080 / fys.length) : 4080;
-const totalWidth  = nameWidth + sourceWidth + fyWidth * fys.length;
+const nameWidth  = fys.length > 1 ? 5040 : 6240;
+const fyWidth    = fys.length > 1 ? Math.floor(4320 / fys.length) : 3120;
+const totalWidth = nameWidth + fyWidth * fys.length;
 
 function headerCell(text, width, align) {
   return new TableCell({
@@ -190,18 +175,17 @@ function headerCell(text, width, align) {
   });
 }
 
+
 const headerRow = new TableRow({
   tableHeader: true,
   children: [
     headerCell('Agency / Cabinet / Department', nameWidth, AlignmentType.LEFT),
-    headerCell('Fund Source', sourceWidth, AlignmentType.LEFT),
     ...fys.map(fy => headerCell(fy, fyWidth))
   ]
 });
 
 const dataRows = Object.entries(data.entities).map(([name, totals], i) => {
   const fill = i % 2 === 0 ? 'F5F7FA' : 'FFFFFF';
-  const source = fundSources[name] || '';
   return new TableRow({
     children: [
       new TableCell({
@@ -209,12 +193,6 @@ const dataRows = Object.entries(data.entities).map(([name, totals], i) => {
         width: { size: nameWidth, type: WidthType.DXA },
         shading: { fill, type: ShadingType.CLEAR },
         children: [new Paragraph({ children: [new TextRun({ text: name, size: 18 })] })]
-      }),
-      new TableCell({
-        borders, margins: cm,
-        width: { size: sourceWidth, type: WidthType.DXA },
-        shading: { fill, type: ShadingType.CLEAR },
-        children: [new Paragraph({ children: [new TextRun({ text: source, size: 16, italics: true, color: '444444' })] })]
       }),
       ...fys.map(fy => new TableCell({
         borders, margins: cm,
@@ -238,12 +216,6 @@ const totalRow = new TableRow({
       children: [new Paragraph({
         children: [new TextRun({ text: 'Total — Named Entity Appropriations', bold: true, size: 20 })]
       })]
-    }),
-    new TableCell({
-      borders, margins: cm,
-      width: { size: sourceWidth, type: WidthType.DXA },
-      shading: { fill: 'D9E1F2', type: ShadingType.CLEAR },
-      children: [new Paragraph({ children: [new TextRun({ text: '' })] })]
     }),
     ...fys.map(fy => new TableCell({
       borders, margins: cm,
@@ -301,7 +273,7 @@ const doc = new Document({
       }),
       new Table({
         width: { size: totalWidth, type: WidthType.DXA },
-        columnWidths: [nameWidth, sourceWidth, ...fys.map(() => fyWidth)],
+        columnWidths: [nameWidth, ...fys.map(() => fyWidth)],
         rows: [headerRow, ...dataRows, totalRow]
       }),
       ...warningParagraphs,
