@@ -415,10 +415,60 @@ def generate_excel_report(data: dict, source_file: str, output_path: str):
 # CLI
 # ---------------------------------------------------------------------------
 
+def diagnose(pdf_path: str):
+    """Print raw extracted lines and pattern matches to help debug empty output."""
+    print(f"\n=== DIAGNOSTIC: {pdf_path} ===\n")
+    lines = []
+    with pdfplumber.open(pdf_path) as pdf:
+        print(f"Total pages: {len(pdf.pages)}")
+        for page_num, page in enumerate(pdf.pages, 1):
+            text = page.extract_text() or ""
+            page_lines = text.split('\n') if text.strip() else []
+            lines.extend(page_lines)
+
+    print(f"Total text lines extracted: {len(lines)}")
+
+    # Show first 40 lines so we can see the document header format
+    print("\n--- First 40 lines ---")
+    for i, l in enumerate(lines[:40]):
+        print(f"  {i+1:4d}: {repr(l)}")
+
+    # Show fiscal year matches
+    fiscal_years = []
+    for line in lines[:300]:
+        for y in YEAR_COL_RE.findall(line):
+            if y not in fiscal_years:
+                fiscal_years.append(y)
+    print(f"\n--- Fiscal years detected (first 300 lines): {fiscal_years} ---")
+
+    # Show all TOTAL_HEADER matches
+    matches = [(i+1, l) for i, l in enumerate(lines) if TOTAL_HEADER_RE.search(l)]
+    print(f"\n--- TOTAL_HEADER_RE matches: {len(matches)} ---")
+    for lineno, l in matches[:30]:
+        print(f"  line {lineno:5d}: {repr(l)}")
+
+    # Show sample TOTAL_ROW matches near first header match
+    if matches:
+        first_lineno = matches[0][0] - 1  # 0-based index
+        print(f"\n--- Lines {first_lineno+1} to {first_lineno+25} (around first header match) ---")
+        for i in range(first_lineno, min(first_lineno + 25, len(lines))):
+            marker = " <-- HEADER" if TOTAL_HEADER_RE.search(lines[i]) else (
+                     " <-- TOTAL ROW" if TOTAL_ROW_RE.match(lines[i]) else "")
+            print(f"  {i+1:5d}: {repr(lines[i])}{marker}")
+
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: python budget_parser.py <budget.pdf> [output.xlsx]")
+        print("       python budget_parser.py --diagnose <budget.pdf>")
         sys.exit(1)
+
+    if sys.argv[1] == "--diagnose":
+        if len(sys.argv) < 3:
+            print("Usage: python budget_parser.py --diagnose <budget.pdf>")
+            sys.exit(1)
+        diagnose(sys.argv[2])
+        sys.exit(0)
 
     pdf_path = sys.argv[1]
 
