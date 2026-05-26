@@ -79,8 +79,8 @@ def extract_budget_data(pdf_path: str) -> dict:
             chunks.append((label, '\n'.join(current_lines)))
 
     system_prompt = (
-        "You are a state budget bill analyst. Extract every named agency, department, cabinet, "
-        "or bureau that receives a dollar appropriation from the provided budget bill text.\n\n"
+        "You are a state budget bill analyst. Extract top-level government appropriations "
+        "from the provided budget bill text.\n\n"
         "Return ONLY valid JSON in exactly this shape:\n"
         "{\n"
         '  "fiscal_years": ["2026-27"],\n'
@@ -89,18 +89,30 @@ def extract_budget_data(pdf_path: str) -> dict:
         '    "Department Of Transportation": {"2026-27": 98765432.0}\n'
         "  }\n"
         "}\n\n"
-        "Rules:\n"
-        "- fiscal_years: fiscal-year labels present in this chunk, formatted YYYY-YY "
-        "(e.g. 2026-27). Derive from any year references in the text.\n"
-        "- entities: one row per named agency/department, Title Case, mapped to "
-        "{fiscal_year_label: total_dollar_amount}. Do not break agencies into sub-items.\n"
-        "- Dollar amounts are plain floats — no $ signs, no commas. "
-        "If the bill lists amounts in thousands, multiply by 1000.\n"
-        "- Include only discrete named entities; skip grand-total or rollup lines.\n"
+        "INCLUDE: government departments, cabinets, agencies, boards, commissions, and bureaus "
+        "that receive a direct legislative appropriation — i.e. entities with their own "
+        "TOTAL or appropriation summary line in the bill.\n\n"
+        "EXCLUDE — do not list these as separate rows:\n"
+        "- Private organizations, nonprofits, clubs, foundations, ranches, or associations "
+        "that receive grants or contracts through a department (e.g. 'Boys and Girls Clubs', "
+        "'Alabama Sheriff's Youth Ranch', 'Heart Gallery Alabama').\n"
+        "- Individual programs, projects, or line items that are sub-components of a "
+        "department's total (e.g. 'Transportation Pilot Program' listed under Human Resources).\n"
+        "- Grand-total or all-funds rollup lines that aggregate multiple departments.\n\n"
+        "If a section lists a department total AND then itemizes grants or programs beneath it, "
+        "include ONLY the department total row — not the individual grants.\n\n"
+        "Other rules:\n"
+        "- fiscal_years: fiscal-year labels in this chunk, formatted YYYY-YY (e.g. 2026-27).\n"
+        "- Entity names in Title Case.\n"
+        "- Dollar amounts as plain floats — no $ signs, no commas. "
+        "If amounts are in thousands, multiply by 1000.\n"
         "- If no appropriations are found, return "
         '{"fiscal_years": [], "entities": {}}.'
     )
 
+    # canonical_name maps lowercase-normalized name -> display name (first seen)
+    # all_entities maps lowercase-normalized name -> {fy: amount}
+    canonical_name: dict = {}
     all_entities: dict = {}
     all_fiscal_years: list = []
 
@@ -138,16 +150,20 @@ def extract_budget_data(pdf_path: str) -> dict:
             for name, amounts in data.get("entities", {}).items():
                 if not isinstance(amounts, dict):
                     continue
-                if name not in all_entities:
-                    all_entities[name] = {}
+                # Normalize for deduplication so "Dept Of X" and "Dept of X"
+                # (capitalization differences across chunks) merge into one row.
+                key = name.strip().lower()
+                if key not in canonical_name:
+                    canonical_name[key] = name.strip()
+                    all_entities[key] = {}
                 for fy, amt in amounts.items():
                     try:
                         amt = float(amt)
                     except (TypeError, ValueError):
                         continue
                     # Keep the higher figure when the same entity appears in multiple chunks
-                    if fy not in all_entities[name] or amt > all_entities[name][fy]:
-                        all_entities[name][fy] = amt
+                    if fy not in all_entities[key] or amt > all_entities[key][fy]:
+                        all_entities[key][fy] = amt
 
         except Exception as exc:
             warnings.append(f"Chunk {idx} ({label}) error: {exc}")
@@ -156,9 +172,10 @@ def extract_budget_data(pdf_path: str) -> dict:
     fiscal_years = all_fiscal_years or ['Total']
     primary_fy = fiscal_years[0]
 
-    # Drop entities where every fiscal year amount is zero
+    # Rebuild with display names and drop zero-amount entities
     ordered_entities = {
-        name: amts for name, amts in all_entities.items()
+        canonical_name[key]: amts
+        for key, amts in all_entities.items()
         if any(v > 0 for v in amts.values())
     }
 
