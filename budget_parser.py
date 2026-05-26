@@ -48,11 +48,35 @@ def extract_budget_data(pdf_path: str) -> dict:
         sys.exit(1)
 
     client = openai.OpenAI(api_key=api_key)
-    full_text = '\n'.join(full_text_lines)
 
-    # Chunk into ~80K-char pieces so each fits comfortably in a single request
-    chunk_size = 80_000
-    chunks = [full_text[i:i + chunk_size] for i in range(0, len(full_text), chunk_size)]
+    # Build page-aware chunks: group complete pages up to ~40K chars each.
+    # This prevents an entity's header and dollar row from landing in different
+    # chunks, which caused silent parse failures and missing totals.
+    PAGE_CHUNK_LIMIT = 40_000
+    chunks = []          # list of (label, text)
+    current_lines = []
+    current_len = 0
+    chunk_start_page = 1
+
+    with pdfplumber.open(pdf_path) as pdf:
+        total_pages = len(pdf.pages)
+        for page_num, page in enumerate(pdf.pages, 1):
+            page_text = page.extract_text() or ""
+            if not page_text.strip():
+                continue
+            page_len = len(page_text)
+            # If adding this page would exceed the limit, flush the current chunk first
+            if current_lines and current_len + page_len > PAGE_CHUNK_LIMIT:
+                label = f"pages {chunk_start_page}–{page_num - 1} of {total_pages}"
+                chunks.append((label, '\n'.join(current_lines)))
+                current_lines = []
+                current_len = 0
+                chunk_start_page = page_num
+            current_lines.append(page_text)
+            current_len += page_len
+        if current_lines:
+            label = f"pages {chunk_start_page}–{total_pages} of {total_pages}"
+            chunks.append((label, '\n'.join(current_lines)))
 
     system_prompt = (
         "You are a state budget bill analyst. Extract every named agency, department, cabinet, "
@@ -81,20 +105,30 @@ def extract_budget_data(pdf_path: str) -> dict:
     all_fiscal_years: list = []
 
     print(f"  Extracting with GPT-4o — {len(chunks)} chunk(s)...")
-    for idx, chunk in enumerate(chunks, 1):
+    for idx, (label, chunk) in enumerate(chunks, 1):
+        print(f"    Chunk {idx}/{len(chunks)}: {label}")
         try:
             response = client.chat.completions.create(
                 model="gpt-4o",
-                max_tokens=8192,
+                max_tokens=16384,
                 temperature=0,
                 seed=42,
                 response_format={"type": "json_object"},
                 messages=[
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": f"Extract appropriations (chunk {idx}/{len(chunks)}):\n\n{chunk}"},
+                    {"role": "user", "content": f"Extract appropriations ({label}):\n\n{chunk}"},
                 ],
             )
+            finish_reason = response.choices[0].finish_reason
             raw = response.choices[0].message.content or ""
+
+            if finish_reason == "length":
+                warnings.append(
+                    f"Chunk {idx} ({label}): response hit token limit — some entities may be missing. "
+                    "Delete the cache file and re-run to retry."
+                )
+                print(f"    WARNING: chunk {idx} hit token limit — partial results only")
+
             data = json.loads(raw)
 
             for fy in data.get("fiscal_years", []):
@@ -116,7 +150,8 @@ def extract_budget_data(pdf_path: str) -> dict:
                         all_entities[name][fy] = amt
 
         except Exception as exc:
-            warnings.append(f"Chunk {idx}/{len(chunks)} error: {exc}")
+            warnings.append(f"Chunk {idx} ({label}) error: {exc}")
+            print(f"    ERROR on chunk {idx}: {exc}")
 
     fiscal_years = all_fiscal_years or ['Total']
     primary_fy = fiscal_years[0]
