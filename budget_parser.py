@@ -206,15 +206,52 @@ def extract_budget_data(pdf_path: str) -> dict:
     # Post-processing filters (deterministic, not AI)
     # ---------------------------------------------------------------------------
 
-    # 1. Personal name: "Lastname, Firstname"
     _personal_name_re = re.compile(r'^[A-Z][A-Za-z\-]+,\s+[A-Z][a-z]+$')
 
-    # 2. Fragment duplicate: entity whose name is a substring of a much larger entity.
-    #    Example: "Law Enforcement Agency" ($174K) inside
-    #             "Law Enforcement Agency, State" ($275M).
     display_names = {k: canonical_name[k] for k in all_entities}
 
+    def _word_set(name: str) -> frozenset:
+        """Normalize a name to a set of words, ignoring punctuation and order."""
+        return frozenset(re.sub(r'[,\-/]', ' ', name.lower()).split())
+
+    # Word-set deduplication: names that are word-order rearrangements of each
+    # other refer to the same entity across chunks.
+    # Example: "Education, State Department Of" == "State Department Of Education"
+    # Keep only the entry with the highest appropriation total.
+    word_set_groups: dict = {}
+    for key in all_entities:
+        ws = _word_set(canonical_name[key])
+        word_set_groups.setdefault(ws, []).append(key)
+
+    word_set_dupes: set = set()
+    for keys in word_set_groups.values():
+        if len(keys) > 1:
+            best = max(keys, key=lambda k: sum(all_entities[k].values()))
+            for k in keys:
+                if k != best:
+                    word_set_dupes.add(k)
+
+    def _is_sub_section(key: str) -> bool:
+        """True if another entity's full name is a prefix/substring of this
+        entity's name AND that other entity has a larger appropriation.
+        Example: "State Board Of Education, Local Boards Of Education" ($5.9B)
+                 is a sub-section of "State Board Of Education" ($7.2B)."""
+        name = display_names[key].lower()
+        amt  = sum(all_entities[key].values())
+        for other_key, other_name in display_names.items():
+            if other_key == key:
+                continue
+            other_lower = other_name.lower()
+            if other_lower in name and other_lower != name:
+                other_amt = sum(all_entities[other_key].values())
+                if other_amt > amt:
+                    return True
+        return False
+
     def _is_fragment_duplicate(key: str) -> bool:
+        """True if this entity's name is a substring of a much larger entity
+        (10x+ amount). Catches short fragment names like "Law Enforcement Agency"
+        ($174K) that are noise inside "Law Enforcement Agency, State" ($275M)."""
         name = display_names[key].lower()
         amt  = sum(all_entities[key].values())
         for other_key, other_name in display_names.items():
@@ -233,6 +270,10 @@ def extract_budget_data(pdf_path: str) -> dict:
         if not any(v > 0 for v in amts.values()):
             return True
         if _personal_name_re.match(name):
+            return True
+        if key in word_set_dupes:
+            return True
+        if _is_sub_section(key):
             return True
         if _is_fragment_duplicate(key):
             return True
