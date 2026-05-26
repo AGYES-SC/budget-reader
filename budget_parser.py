@@ -58,7 +58,7 @@ def extract_budget_data(pdf_path: str) -> dict:
             tagged_len = len(tagged)
             if current_parts and current_len + tagged_len > PAGE_CHUNK_LIMIT:
                 label = f"pages {chunk_start_page}–{page_num - 1} of {page_count}"
-                chunks.append((label, '\n'.join(current_parts)))
+                chunks.append((label, '\n'.join(current_parts), chunk_start_page))
                 current_parts = []
                 current_len = 0
                 chunk_start_page = page_num
@@ -66,18 +66,17 @@ def extract_budget_data(pdf_path: str) -> dict:
             current_len += tagged_len
         if current_parts:
             label = f"pages {chunk_start_page}–{page_count} of {page_count}"
-            chunks.append((label, '\n'.join(current_parts)))
+            chunks.append((label, '\n'.join(current_parts), chunk_start_page))
 
     system_prompt = (
         "You are a state budget bill analyst. Extract every named appropriation from the "
-        "provided state budget bill text. Pages are marked with '--- PAGE N ---' headers — "
-        "use these to record the page number where each entity's appropriation appears.\n\n"
+        "provided state budget bill text.\n\n"
         "Return ONLY valid JSON in exactly this shape:\n"
         "{\n"
         '  "fiscal_years": ["2026-27"],\n'
         '  "entities": {\n'
-        '    "Department Of Education": {"2026-27": 123456789.0, "_page": 12},\n'
-        '    "Department Of Transportation": {"2026-27": 98765432.0, "_page": 45}\n'
+        '    "Department Of Education": {"2026-27": 123456789.0},\n'
+        '    "Department Of Transportation": {"2026-27": 98765432.0}\n'
         "  }\n"
         "}\n\n"
         "CORE RULE — one row per entity, never double-count:\n"
@@ -108,7 +107,6 @@ def extract_budget_data(pdf_path: str) -> dict:
         "(e.g. 'Total General Fund', 'All Funds Total')\n\n"
         "Other rules:\n"
         "- fiscal_years: fiscal-year labels in this chunk, formatted YYYY-YY (e.g. 2026-27).\n"
-        "- _page: integer page number from the nearest '--- PAGE N ---' marker above the entity.\n"
         "- Entity names in Title Case.\n"
         "- Dollar amounts as plain floats — no $ signs, no commas. "
         "If amounts are in thousands, multiply by 1000.\n"
@@ -118,14 +116,14 @@ def extract_budget_data(pdf_path: str) -> dict:
 
     # canonical_name: lowercase key -> display name (first seen)
     # all_entities:   lowercase key -> {fy: amount}
-    # all_pages:      lowercase key -> page number
+    # all_pages:      lowercase key -> page number (start page of chunk where first seen)
     canonical_name: dict = {}
     all_entities: dict = {}
     all_pages: dict = {}
     all_fiscal_years: list = []
 
     print(f"  Extracting with GPT-4o — {len(chunks)} chunk(s)...")
-    for idx, (label, chunk) in enumerate(chunks, 1):
+    for idx, (label, chunk, chunk_start) in enumerate(chunks, 1):
         print(f"    Chunk {idx}/{len(chunks)}: {label}")
         try:
             response = client.chat.completions.create(
@@ -160,22 +158,15 @@ def extract_budget_data(pdf_path: str) -> dict:
                 if not isinstance(amounts, dict):
                     continue
 
-                # Pull _page out before treating the rest as fiscal-year amounts
-                page_num = amounts.get("_page")
-                amounts = {k: v for k, v in amounts.items() if k != "_page"}
-
                 # Normalize for deduplication (capitalization differences across chunks)
                 key = name.strip().lower()
                 if key not in canonical_name:
                     canonical_name[key] = name.strip()
                     all_entities[key] = {}
-
-                # Record page number (first seen wins)
-                if page_num is not None and key not in all_pages:
-                    try:
-                        all_pages[key] = int(page_num)
-                    except (TypeError, ValueError):
-                        pass
+                    # Page number = start page of the chunk where entity first appears.
+                    # Derived from the chunk label rather than GPT-4o output, so large
+                    # numbers with comma separators can never corrupt the page field.
+                    all_pages[key] = chunk_start
 
                 for fy, amt in amounts.items():
                     try:
