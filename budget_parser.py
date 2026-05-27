@@ -71,85 +71,65 @@ def extract_budget_data(pdf_path: str) -> dict:
         "Return ONLY valid JSON in exactly this shape:\n"
         "{\n"
         '  "fiscal_years": ["2026-27"],\n'
-        '  "entities": {\n'
-        '    "Department Of Education": {"2026-27": 123456789.0},\n'
-        '    "Department Of Transportation": {"2026-27": 98765432.0}\n'
+        '  "section_totals": {\n'
+        '    "Department Of Agriculture – General Administration": {"2026-27": 14719072.0},\n'
+        '    "Department Of Agriculture – Meat Inspection Fund": {"2026-27": 1214444.0},\n'
+        '    "State Board Of Education": {"2026-27": 3100000000.0}\n'
+        "  },\n"
+        '  "sub_allocations": {\n'
+        '    "Alabama Reading Initiative": {"2026-27": 151000000.0},\n'
+        '    "Alabama Numeracy Act": {"2026-27": 114000000.0}\n'
         "  }\n"
         "}\n\n"
-        "CORE RULE — one row per entity, never double-count:\n"
-        "A budget section for a single entity may show a TOTAL appropriation and then "
-        "list how those funds are divided among programs, initiatives, or purposes. "
-        "Record ONLY the entity's TOTAL. Do NOT separately list the program lines — "
-        "they are sub-allocations of the total already counted above.\n"
-        "Example: 'State Department of Education — $3.1B' followed by "
-        "'Alabama Reading Initiative — $151M', 'Alabama Numeracy Act — $114M', etc. "
-        "→ return ONLY 'State Department of Education: $3.1B'. "
-        "The reading and numeracy programs are spending directions within that $3.1B, not separate appropriations.\n\n"
-        "HOW TO TELL A SEPARATE APPROPRIATION FROM A SUB-ALLOCATION:\n"
-        "A SEPARATE APPROPRIATION has its own section title, its own fund code, and its own Total figure. "
-        "Include it as its own row regardless of size.\n"
-        "  INCLUDE — each of these is its own titled section with its own Total:\n"
-        "  • 'Department of Agriculture – General Administration   $14,719,072'\n"
-        "  • 'Department of Agriculture – Meat Inspection Fund   $1,214,444'\n"
-        "  • 'Department of Agriculture – Agricultural Awards Fund   $15,000'\n"
-        "  • 'Governor's Office – Custodial Fund   $653,000'\n"
-        "  CRITICAL: dash-separated fund names like '– Meat Inspection Fund' or '– Custodial Fund' "
-        "are INDEPENDENT sections, NOT sub-items of the parent department. "
-        "Each one has its own fund code and its own Total in the bill. Return every one.\n"
-        "A SUB-ALLOCATION is a line item INSIDE another entity's section that shows how "
-        "that entity's already-stated Total is split among internal purposes. It has no "
-        "separate section title or fund code.\n"
-        "  EXCLUDE — these are internal breakdowns of a parent section's Total, not separate sections:\n"
-        "  • 'Reading Initiative $151M' listed inside 'State Dept of Education — Total $3.1B'\n"
-        "  • 'Numeracy Act $114M' listed inside the same Education section\n"
-        "RULE: own section title + own fund code + own Total = separate row. "
-        "Line inside another section's breakdown = sub-allocation, skip it.\n\n"
-        "RULE OF THUMB: Own section title + own dollar figure = separate row. "
-        "Line item inside another section's breakdown = sub-allocation, skip it.\n\n"
-        "SEPARATE SECTIONS RULE — do not combine across sections:\n"
-        "Some bills fund the same agency in multiple independent sections "
-        "(e.g. a General Revenue Fund article AND a Special Revenue Fund article). "
-        "If the same entity name carries its own separate appropriation in two or more "
-        "distinct sections, return each as its own independent entry with its exact stated amount. "
-        "Never add or merge figures from separate sections — return them as separate rows. "
-        "This applies across sections only; within a single section still return just the entity's TOTAL.\n\n"
-        "INCLUDE one row for each of these:\n"
-        "- Government departments, agencies, boards, commissions, bureaus — at their TOTAL level\n"
-        "- Universities and colleges at their TOTAL appropriation level\n"
-        "- Named funds or authorities that receive a direct top-level appropriation\n"
-        "- Miscellaneous/special sections — include each named item that has its own "
-        "independent appropriation not already captured in a parent entity's total\n"
-        "- Law enforcement, public safety, and corrections entities and their funds — "
-        "sheriffs' programs, police funds, jail commissions, corrections facilities "
-        "are government appropriations and must always be included\n\n"
-        "EXCLUDE:\n"
+        "SECTION TOTALS — put in 'section_totals':\n"
+        "Every named section that has its own title AND its own Total figure. Include:\n"
+        "- Government departments, agencies, boards, commissions, bureaus\n"
+        "- Universities and colleges\n"
+        "- Named funds or authorities with their own fund code and Total\n"
+        "- Dash-separated fund divisions, e.g. 'Department of Agriculture – Meat Inspection Fund'\n"
+        "  and 'Governor's Office – Custodial Fund' — each is an INDEPENDENT section with its own\n"
+        "  fund code and Total. Return every one.\n"
+        "- Law enforcement, public safety, corrections entities and their funds\n"
+        "- Any miscellaneous named item with its own independent appropriation\n\n"
+        "SEPARATE SECTIONS RULE — never merge across sections:\n"
+        "If the same entity name appears in multiple independent bill sections (e.g. a General\n"
+        "Revenue article AND a Special Revenue article), return each as its own entry with its\n"
+        "exact stated amount. Never add or merge figures from separate sections.\n\n"
+        "SUB-ALLOCATIONS — put in 'sub_allocations':\n"
+        "Named line items INSIDE another entity's section that show how that entity's total is\n"
+        "divided among programs, initiatives, or purposes. These are spending directions within\n"
+        "an already-counted total and should NOT appear in section_totals.\n"
+        "Example: 'Alabama Reading Initiative — $151M' and 'Alabama Numeracy Act — $114M'\n"
+        "listed inside 'State Board Of Education — Total $3.1B' → put them in sub_allocations.\n\n"
+        "EXCLUDE from both dicts:\n"
         "- Individual persons' names (e.g. 'Smith, John')\n"
-        "- Program lines, initiatives, or designated uses that appear WITHIN a named "
-        "entity's budget section and are sub-allocations of that entity's total\n"
-        "- Private nonprofit organizations that receive grants routed THROUGH a "
-        "department which already has its own larger total line\n"
         "- Grand-total rollup lines that sum multiple departments "
-        "(e.g. 'Total General Fund', 'All Funds Total')\n\n"
+        "(e.g. 'Total General Fund', 'All Funds Total')\n"
+        "- Private nonprofit organizations that receive grants routed THROUGH a department\n\n"
         "Other rules:\n"
         "- fiscal_years: fiscal-year labels in this chunk, formatted YYYY-YY (e.g. 2026-27).\n"
         "- Entity names in Title Case.\n"
         "- Dollar amounts as plain floats — no $ signs, no commas. "
         "If amounts are in thousands, multiply by 1000.\n"
         "- If no appropriations are found, return "
-        '{"fiscal_years": [], "entities": {}}.'
+        '{"fiscal_years": [], "section_totals": {}, "sub_allocations": {}}.'
     )
 
-    # canonical_name: lowercase key -> display name (first seen)
-    # all_entities:   lowercase key -> {fy: amount}
-    # all_pages:      lowercase key -> page number (start page of chunk where first seen)
-    canonical_name: dict = {}
-    all_entities:   dict = {}
-    all_pages:      dict = {}
+    # Separate tracking for section_totals and sub_allocations.
+    # Each category has its own canonical-name map, entities dict, pages dict,
+    # and exact-dedup set so the two pools never interfere.
+    st_canonical: dict = {}   # section_totals
+    st_entities:  dict = {}
+    st_pages:     dict = {}
+    st_seen:      set  = set()
+
+    sa_canonical: dict = {}   # sub_allocations
+    sa_entities:  dict = {}
+    sa_pages:     dict = {}
+    sa_seen:      set  = set()
+
     all_fiscal_years: list = []
 
-    seen_exact: set = set()  # (lowercase_name, amounts_frozenset) — skips identical re-extractions
-    # Use a work queue so chunks that hit the token limit can be split in half
-    # and retried automatically without losing any entities.
     work_queue = deque(initial_chunks)
     print(f"  Extracting with GPT-4o — {len(initial_chunks)} chunk(s)...")
 
@@ -178,14 +158,12 @@ def extract_budget_data(pdf_path: str) -> dict:
 
             if finish_reason == "length":
                 if len(pages) > 1:
-                    # Split in half and re-queue — no entities are lost
                     mid = len(pages) // 2
                     work_queue.appendleft(pages[mid:])
                     work_queue.appendleft(pages[:mid])
                     print(f"      → token limit hit — splitting into {mid} + {len(pages) - mid} pages")
                     continue
                 else:
-                    # Single-page chunk; can't split further
                     warnings.append(
                         f"{label}: single-page chunk hit token limit — entities on this page may be incomplete."
                     )
@@ -197,51 +175,56 @@ def extract_budget_data(pdf_path: str) -> dict:
                 if fy not in all_fiscal_years:
                     all_fiscal_years.append(fy)
 
-            chunk_entity_count = 0
-            for name, amounts in data.get("entities", {}).items():
-                if not isinstance(amounts, dict):
-                    continue
+            # Process both categories with identical dedup logic
+            categories = [
+                (data.get("section_totals", {}), st_canonical, st_entities, st_pages, st_seen),
+                (data.get("sub_allocations", {}),  sa_canonical, sa_entities, sa_pages, sa_seen),
+            ]
+            chunk_st_count = 0
+            chunk_sa_count = 0
 
-                key = name.strip().lower()
-                valid_amounts = {}
-                for fy, amt in amounts.items():
-                    try:
-                        valid_amounts[fy] = float(amt)
-                    except (TypeError, ValueError):
+            for cat_idx, (src_dict, canonical, entities, pg_map, seen) in enumerate(categories):
+                for name, amounts in src_dict.items():
+                    if not isinstance(amounts, dict):
                         continue
-                if not valid_amounts or not any(v > 0 for v in valid_amounts.values()):
-                    continue
 
-                # Identical (name + amounts) seen again = the same entity re-extracted
-                # from context that spans a chunk boundary — skip the duplicate.
-                # Same name with a DIFFERENT amount = the entity appears in a separate
-                # bill section and must be kept as its own row.
-                amounts_sig = frozenset(valid_amounts.items())
-                if (key, amounts_sig) in seen_exact:
-                    continue
-                seen_exact.add((key, amounts_sig))
+                    key = name.strip().lower()
+                    valid_amounts = {}
+                    for fy, amt in amounts.items():
+                        try:
+                            valid_amounts[fy] = float(amt)
+                        except (TypeError, ValueError):
+                            continue
+                    if not valid_amounts or not any(v > 0 for v in valid_amounts.values()):
+                        continue
 
-                if key not in canonical_name:
-                    canonical_name[key] = name.strip()
-                    all_entities[key] = valid_amounts
-                    all_pages[key] = start_page
-                else:
-                    # Same name already recorded with a different amount: a separate
-                    # appropriation elsewhere in the bill. Store under a unique internal
-                    # key; display name gets a "(p. N)" suffix for disambiguation.
-                    page_key = f"{key} [p{start_page}]"
-                    counter = 2
-                    while page_key in canonical_name:
-                        page_key = f"{key} [p{start_page}:{counter}]"
-                        counter += 1
-                    canonical_name[page_key] = f"{name.strip()} (p. {start_page})"
-                    all_entities[page_key] = valid_amounts
-                    all_pages[page_key] = start_page
+                    amounts_sig = frozenset(valid_amounts.items())
+                    if (key, amounts_sig) in seen:
+                        continue
+                    seen.add((key, amounts_sig))
 
-                chunk_entity_count += 1
+                    if key not in canonical:
+                        canonical[key] = name.strip()
+                        entities[key]  = valid_amounts
+                        pg_map[key]    = start_page
+                    else:
+                        # Same name, different amounts → separate bill section
+                        page_key = f"{key} [p{start_page}]"
+                        counter = 2
+                        while page_key in canonical:
+                            page_key = f"{key} [p{start_page}:{counter}]"
+                            counter += 1
+                        canonical[page_key] = f"{name.strip()} (p. {start_page})"
+                        entities[page_key]  = valid_amounts
+                        pg_map[page_key]    = start_page
 
-            print(f"      → {chunk_entity_count} entities found")
-            if chunk_entity_count == 0:
+                    if cat_idx == 0:
+                        chunk_st_count += 1
+                    else:
+                        chunk_sa_count += 1
+
+            print(f"      → {chunk_st_count} section totals, {chunk_sa_count} sub-allocations found")
+            if chunk_st_count == 0 and chunk_sa_count == 0:
                 warnings.append(
                     f"{label}: 0 entities returned — this page range may be missing from the report."
                 )
@@ -254,131 +237,101 @@ def extract_budget_data(pdf_path: str) -> dict:
     fiscal_years = all_fiscal_years or ['Total']
 
     # ---------------------------------------------------------------------------
-    # Post-processing filters (deterministic, not AI)
+    # Post-processing filters
     # ---------------------------------------------------------------------------
 
     _personal_name_re = re.compile(r'^[A-Z][A-Za-z\-]+,\s+[A-Z][a-z]+$')
     _page_suffix_re   = re.compile(r'\s*\(p\.\s*[\d:]+\)\s*$')
 
     def _base_name(name: str) -> str:
-        """Strip the '(p. N)' page-disambiguation suffix from same-name section variants."""
         return _page_suffix_re.sub('', name).strip()
 
-    display_names = {k: canonical_name[k] for k in all_entities}
+    # --- Section-total filters (full suite) ---
+
+    st_display = {k: st_canonical[k] for k in st_entities}
 
     def _word_set(name: str) -> frozenset:
-        """Normalize to a word set ignoring punctuation/order, using the base name
-        so page-suffix variants group correctly with their base entry."""
         return frozenset(re.sub(r'[,\-/]', ' ', _base_name(name).lower()).split())
 
-    # Word-set deduplication: names that are word-order rearrangements of each other
-    # (e.g. "Education, State Department Of" == "State Department Of Education") are
-    # duplicates. Page-suffix variants ("[pN]" internal key) are intentional separate
-    # appropriations — never merge them.
     word_set_groups: dict = {}
-    for key in all_entities:
-        ws = _word_set(canonical_name[key])
+    for key in st_entities:
+        ws = _word_set(st_canonical[key])
         word_set_groups.setdefault(ws, []).append(key)
 
     word_set_dupes: set = set()
     for keys_in_group in word_set_groups.values():
         if len(keys_in_group) > 1:
-            # Only merge entries that don't have a page-suffix internal key — those are
-            # intentional separate-section rows and must stay independent.
             base_keys = [k for k in keys_in_group if '[p' not in k]
             if len(base_keys) > 1:
-                best = max(base_keys, key=lambda k: sum(all_entities[k].values()))
+                best = max(base_keys, key=lambda k: sum(st_entities[k].values()))
                 for k in base_keys:
                     if k != best:
                         word_set_dupes.add(k)
 
-    def _is_sub_section(key: str) -> bool:
-        """True if another entity's base name is a substring of this entity's base name,
-        the extension is comma/colon-separated (hierarchical), AND the other entity has a
-        larger appropriation.
-
-        Comma/colon separation → hierarchical sub-section → exclude.
-          e.g. 'State Board Of Education, Local Boards Of Education' extends
-               'State Board Of Education' via comma → sub-section.
-        Dash separation (– or —) → parallel fund division → keep.
-          e.g. 'Department of Agriculture – Meat Inspection Fund' extends
-               'Department of Agriculture' via dash → independent section, NOT filtered."""
-        name = _base_name(display_names[key]).lower()
-        amt  = sum(all_entities[key].values())
-        for other_key, other_name in display_names.items():
-            if other_key == key:
-                continue
-            other_base = _base_name(other_name).lower()
-            if other_base == name:
-                continue  # Same base name (page-suffix variant) — not a sub-section
-            if other_base in name and other_base != name:
-                # Check what character follows the shared prefix in this name
-                remainder = name[len(other_base):].lstrip()
-                if not remainder or remainder[0] not in (',', ':'):
-                    continue  # Dash or other separator → parallel division, not a sub-section
-                other_amt = sum(all_entities[other_key].values())
-                if other_amt > amt:
-                    return True
-        return False
-
     def _is_fragment_duplicate(key: str) -> bool:
-        """True if this entity's base name is a substring of a much larger entity's
-        base name (10x+ amount) — a short fragment noise entry."""
-        name = _base_name(display_names[key]).lower()
-        amt  = sum(all_entities[key].values())
-        for other_key, other_name in display_names.items():
+        name = _base_name(st_display[key]).lower()
+        amt  = sum(st_entities[key].values())
+        for other_key, other_name in st_display.items():
             if other_key == key:
                 continue
             other_base = _base_name(other_name).lower()
             if other_base == name:
-                continue  # Same base name (page-suffix variant) — not a fragment
+                continue
             if name in other_base and other_base != name:
-                other_amt = sum(all_entities[other_key].values())
+                other_amt = sum(st_entities[other_key].values())
                 if other_amt > amt * 10:
                     return True
         return False
 
-    def _should_exclude(key: str) -> bool:
-        name = canonical_name[key]
-        amts = all_entities[key]
+    def _should_exclude_st(key: str) -> bool:
+        name = st_canonical[key]
+        amts = st_entities[key]
         if not any(v > 0 for v in amts.values()):
             return True
         if _personal_name_re.match(name):
             return True
         if key in word_set_dupes:
             return True
-        if _is_sub_section(key):
-            return True
         if _is_fragment_duplicate(key):
             return True
         return False
 
-    ordered_entities = {
-        canonical_name[key]: amts
-        for key, amts in all_entities.items()
-        if not _should_exclude(key)
+    # --- Sub-allocation filters (personal-name only) ---
+
+    def _should_exclude_sa(key: str) -> bool:
+        name = sa_canonical[key]
+        amts = sa_entities[key]
+        if not any(v > 0 for v in amts.values()):
+            return True
+        if _personal_name_re.match(name):
+            return True
+        return False
+
+    ordered_st = {
+        st_canonical[k]: v
+        for k, v in st_entities.items()
+        if not _should_exclude_st(k)
     }
 
-    # Page numbers keyed by display name, for entities that survived filtering
-    entity_pages = {
-        canonical_name[key]: all_pages.get(key)
-        for key in all_entities
-        if not _should_exclude(key)
+    ordered_sa = {
+        sa_canonical[k]: v
+        for k, v in sa_entities.items()
+        if not _should_exclude_sa(k)
     }
 
     grand_totals = {
-        fy: sum(e.get(fy, 0) for e in ordered_entities.values())
+        fy: sum(e.get(fy, 0) for e in ordered_st.values())
         for fy in fiscal_years
     }
 
     return {
-        "entities": ordered_entities,
-        "entity_pages": entity_pages,
-        "fiscal_years": fiscal_years,
-        "grand_totals": grand_totals,
+        "section_totals":    ordered_st,
+        "sub_allocations":   ordered_sa,
+        "fiscal_years":      fiscal_years,
+        "grand_totals":      grand_totals,
         "bill_grand_totals": {},
-        "page_count": page_count,
-        "warnings": warnings,
+        "page_count":        page_count,
+        "warnings":          warnings,
     }
 
 
@@ -386,13 +339,16 @@ def extract_budget_data(pdf_path: str) -> dict:
 # Excel Report
 # ---------------------------------------------------------------------------
 
-COLOR_HEADER_BG = "1F3864"
-COLOR_HEADER_FG = "FFFFFF"
-COLOR_TOTAL_BG  = "D9E1F2"
-COLOR_META_FG   = "666666"
-COLOR_ROW_EVEN  = "F5F7FA"
-COLOR_ROW_ODD   = "FFFFFF"
-COLOR_NOTES_FG  = "888888"
+COLOR_HEADER_BG  = "1F3864"
+COLOR_HEADER_FG  = "FFFFFF"
+COLOR_TOTAL_BG   = "D9E1F2"
+COLOR_META_FG    = "666666"
+COLOR_ROW_EVEN   = "F5F7FA"
+COLOR_ROW_ODD    = "FFFFFF"
+COLOR_NOTES_FG   = "888888"
+COLOR_SA_BG      = "F0F0F0"   # sub-allocation rows — light gray
+COLOR_SA_HEADER  = "E0E0E0"   # sub-allocation section header
+COLOR_SA_FG      = "555555"
 
 DOLLAR_FMT = '_($* #,##0_);_($* (#,##0);_($* "-"_);_(@_)'
 
@@ -412,13 +368,13 @@ def generate_excel_report(data: dict, source_file: str, output_path: str):
     ws.title = "Appropriations Summary"
 
     fys          = data["fiscal_years"]
-    entities     = data["entities"]
+    entities     = data["section_totals"]
+    sub_allocs   = data.get("sub_allocations", {})
     grand_totals = data["grand_totals"]
     bill_totals  = data["bill_grand_totals"]
 
-    # Column layout: [Name] [FY1] [FY2] ...
     FY_START = 2
-    num_cols = 1 + len(fys)   # name + fiscal years
+    num_cols = 1 + len(fys)
 
     # --- Row 1: Title ---------------------------------------------------------
     ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=num_cols)
@@ -455,7 +411,7 @@ def generate_excel_report(data: dict, source_file: str, output_path: str):
         c.alignment = Alignment(horizontal="right", vertical="center")
         c.border    = _border()
 
-    # --- Rows 5+: Entity data -------------------------------------------------
+    # --- Rows 5+: Section-total entity rows -----------------------------------
     for offset, (name, amounts) in enumerate(entities.items()):
         r    = 5 + offset
         fill = COLOR_ROW_EVEN if offset % 2 == 0 else COLOR_ROW_ODD
@@ -515,6 +471,39 @@ def generate_excel_report(data: dict, source_file: str, output_path: str):
 
         next_row += 1
 
+    # --- Sub-allocations section (shown for reference) ------------------------
+    if sub_allocs:
+        next_row += 1  # spacer
+
+        ws.merge_cells(start_row=next_row, start_column=1,
+                       end_row=next_row, end_column=num_cols)
+        c = ws.cell(row=next_row, column=1,
+                    value="Sub-Allocations — shown for reference only; already included in section totals above")
+        c.font      = Font(name="Arial", size=10, bold=True, italic=True, color=COLOR_SA_FG)
+        c.fill      = _fill(COLOR_SA_HEADER)
+        c.alignment = Alignment(horizontal="left", vertical="center")
+        c.border    = _border()
+        ws.row_dimensions[next_row].height = 18
+        next_row += 1
+
+        for name, amounts in sub_allocs.items():
+            c = ws.cell(row=next_row, column=1, value=f"  ↳ {name}")
+            c.font      = Font(name="Arial", size=9, italic=True, color=COLOR_SA_FG)
+            c.fill      = _fill(COLOR_SA_BG)
+            c.alignment = Alignment(horizontal="left", vertical="center", indent=1)
+            c.border    = _border()
+
+            for col, fy in enumerate(fys, start=FY_START):
+                amt = amounts.get(fy, 0)
+                c = ws.cell(row=next_row, column=col, value=amt if amt else None)
+                c.font          = Font(name="Arial", size=9, italic=True, color=COLOR_SA_FG)
+                c.fill          = _fill(COLOR_SA_BG)
+                c.alignment     = Alignment(horizontal="right", vertical="center")
+                c.border        = _border()
+                c.number_format = DOLLAR_FMT
+
+            next_row += 1
+
     # --- Warnings -------------------------------------------------------------
     if data["warnings"]:
         next_row += 1
@@ -538,16 +527,17 @@ def generate_excel_report(data: dict, source_file: str, output_path: str):
     c = ws.cell(row=next_row, column=1,
                 value=(
                     "Methodology: Appropriations were extracted from the source PDF using AI (GPT-4o). "
-                    "Each named agency, department, cabinet, or bureau is listed with its all-funds appropriation "
-                    "for the identified fiscal year(s). Grand-total and rollup lines are excluded to prevent "
-                    "double-counting. Verify all figures against the enrolled bill before citing."
+                    "Section totals represent each named agency, department, fund, or authority at its "
+                    "own appropriated Total. Sub-allocations (shown below the grand total) are internal "
+                    "program lines within a section and are already included in the section total above — "
+                    "they are not added to the grand total. Verify all figures against the enrolled bill before citing."
                 ))
     c.font      = Font(name="Arial", size=8, italic=True, color=COLOR_NOTES_FG)
     c.alignment = Alignment(wrap_text=True, vertical="top")
     ws.row_dimensions[next_row].height = 54
 
     # --- Column widths and freeze ---------------------------------------------
-    ws.column_dimensions["A"].width = 60          # entity name
+    ws.column_dimensions["A"].width = 60
     for col in range(FY_START, num_cols + 1):
         ws.column_dimensions[get_column_letter(col)].width = 20
     ws.freeze_panes = "A5"
@@ -588,7 +578,8 @@ def main():
         with open(cache_path, 'w') as f:
             json.dump(data, f, indent=2)
 
-    print(f"\nFound {len(data['entities'])} budget entities")
+    print(f"\nFound {len(data['section_totals'])} section-total entities, "
+          f"{len(data.get('sub_allocations', {}))} sub-allocations")
     print(f"Fiscal years: {', '.join(data['fiscal_years'])}")
     for fy in data['fiscal_years']:
         print(f"Total {fy}: ${data['grand_totals'].get(fy, 0):,.0f}")
