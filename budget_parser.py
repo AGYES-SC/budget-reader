@@ -86,21 +86,24 @@ def extract_budget_data(pdf_path: str) -> dict:
         "→ return ONLY 'State Department of Education: $3.1B'. "
         "The reading and numeracy programs are spending directions within that $3.1B, not separate appropriations.\n\n"
         "HOW TO TELL A SEPARATE APPROPRIATION FROM A SUB-ALLOCATION:\n"
-        "A SEPARATE APPROPRIATION has its own section title and its own appropriation figure "
-        "in the bill. Include it as its own row regardless of size or whether it shares a "
-        "name prefix with another entity.\n"
-        "  INCLUDE examples (each is its own section in the bill):\n"
-        "  • 'Governor's Office — Custodial Fund   $653,000'\n"
-        "  • 'Department of Agriculture — General Administration   $14,719,072'\n"
-        "  • 'Department of Agriculture — Meat Inspection   $3,286,000'\n"
-        "  The Agriculture examples above are PARALLEL divisions, each independently funded. "
-        "Many state bills break a department into multiple separately-appropriated divisions or "
-        "programs — each one is its own row, even though they share the department name.\n"
-        "A SUB-ALLOCATION is a line item INSIDE another entity's section that shows how that "
-        "entity's already-stated total is divided among internal purposes. It is NOT its own section.\n"
-        "  EXCLUDE examples (these appear under a parent total, not as their own sections):\n"
-        "  • Within 'State Dept of Education — Total $3.1B': sub-lines for "
-        "'Reading Initiative $151M', 'Numeracy Act $114M' → breakdowns of the $3.1B, skip them.\n"
+        "A SEPARATE APPROPRIATION has its own section title, its own fund code, and its own Total figure. "
+        "Include it as its own row regardless of size.\n"
+        "  INCLUDE — each of these is its own titled section with its own Total:\n"
+        "  • 'Department of Agriculture – General Administration   $14,719,072'\n"
+        "  • 'Department of Agriculture – Meat Inspection Fund   $1,214,444'\n"
+        "  • 'Department of Agriculture – Agricultural Awards Fund   $15,000'\n"
+        "  • 'Governor's Office – Custodial Fund   $653,000'\n"
+        "  CRITICAL: dash-separated fund names like '– Meat Inspection Fund' or '– Custodial Fund' "
+        "are INDEPENDENT sections, NOT sub-items of the parent department. "
+        "Each one has its own fund code and its own Total in the bill. Return every one.\n"
+        "A SUB-ALLOCATION is a line item INSIDE another entity's section that shows how "
+        "that entity's already-stated Total is split among internal purposes. It has no "
+        "separate section title or fund code.\n"
+        "  EXCLUDE — these are internal breakdowns of a parent section's Total, not separate sections:\n"
+        "  • 'Reading Initiative $151M' listed inside 'State Dept of Education — Total $3.1B'\n"
+        "  • 'Numeracy Act $114M' listed inside the same Education section\n"
+        "RULE: own section title + own fund code + own Total = separate row. "
+        "Line inside another section's breakdown = sub-allocation, skip it.\n\n"
         "RULE OF THUMB: Own section title + own dollar figure = separate row. "
         "Line item inside another section's breakdown = sub-allocation, skip it.\n\n"
         "SEPARATE SECTIONS RULE — do not combine across sections:\n"
@@ -290,9 +293,16 @@ def extract_budget_data(pdf_path: str) -> dict:
                         word_set_dupes.add(k)
 
     def _is_sub_section(key: str) -> bool:
-        """True if another entity's base name is a substring of this entity's base name
-        AND that other entity has a larger appropriation — indicating this is a sub-section.
-        Uses base names to avoid false positives on page-suffix variants of the same entity."""
+        """True if another entity's base name is a substring of this entity's base name,
+        the extension is comma/colon-separated (hierarchical), AND the other entity has a
+        larger appropriation.
+
+        Comma/colon separation → hierarchical sub-section → exclude.
+          e.g. 'State Board Of Education, Local Boards Of Education' extends
+               'State Board Of Education' via comma → sub-section.
+        Dash separation (– or —) → parallel fund division → keep.
+          e.g. 'Department of Agriculture – Meat Inspection Fund' extends
+               'Department of Agriculture' via dash → independent section, NOT filtered."""
         name = _base_name(display_names[key]).lower()
         amt  = sum(all_entities[key].values())
         for other_key, other_name in display_names.items():
@@ -302,6 +312,10 @@ def extract_budget_data(pdf_path: str) -> dict:
             if other_base == name:
                 continue  # Same base name (page-suffix variant) — not a sub-section
             if other_base in name and other_base != name:
+                # Check what character follows the shared prefix in this name
+                remainder = name[len(other_base):].lstrip()
+                if not remainder or remainder[0] not in (',', ':'):
+                    continue  # Dash or other separator → parallel division, not a sub-section
                 other_amt = sum(all_entities[other_key].values())
                 if other_amt > amt:
                     return True
