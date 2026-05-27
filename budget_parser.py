@@ -85,6 +85,13 @@ def extract_budget_data(pdf_path: str) -> dict:
         "'Alabama Reading Initiative — $151M', 'Alabama Numeracy Act — $114M', etc. "
         "→ return ONLY 'State Department of Education: $3.1B'. "
         "The reading and numeracy programs are spending directions within that $3.1B, not separate appropriations.\n\n"
+        "SEPARATE SECTIONS RULE — do not combine across sections:\n"
+        "Some bills fund the same agency in multiple independent sections "
+        "(e.g. a General Revenue Fund article AND a Special Revenue Fund article). "
+        "If the same entity name carries its own separate appropriation in two or more "
+        "distinct sections, return each as its own independent entry with its exact stated amount. "
+        "Never add or merge figures from separate sections — return them as separate rows. "
+        "This applies across sections only; within a single section still return just the entity's TOTAL.\n\n"
         "INCLUDE one row for each of these:\n"
         "- Government departments, agencies, boards, commissions, bureaus — at their TOTAL level\n"
         "- Universities and colleges at their TOTAL appropriation level\n"
@@ -119,6 +126,7 @@ def extract_budget_data(pdf_path: str) -> dict:
     all_pages:      dict = {}
     all_fiscal_years: list = []
 
+    seen_exact: set = set()  # (lowercase_name, amounts_frozenset) — skips identical re-extractions
     # Use a work queue so chunks that hit the token limit can be split in half
     # and retried automatically without losing any entities.
     work_queue = deque(initial_chunks)
@@ -173,23 +181,41 @@ def extract_budget_data(pdf_path: str) -> dict:
                 if not isinstance(amounts, dict):
                     continue
 
-                # Normalize for deduplication (capitalization differences across chunks)
                 key = name.strip().lower()
-                if key not in canonical_name:
-                    canonical_name[key] = name.strip()
-                    all_entities[key] = {}
-                    # Page number derived from chunk metadata, not GPT-4o output,
-                    # so comma-separated large numbers can never corrupt this field.
-                    all_pages[key] = start_page
-
+                valid_amounts = {}
                 for fy, amt in amounts.items():
                     try:
-                        amt = float(amt)
+                        valid_amounts[fy] = float(amt)
                     except (TypeError, ValueError):
                         continue
-                    # Keep the higher figure when the same entity appears in multiple chunks
-                    if fy not in all_entities[key] or amt > all_entities[key][fy]:
-                        all_entities[key][fy] = amt
+                if not valid_amounts or not any(v > 0 for v in valid_amounts.values()):
+                    continue
+
+                # Identical (name + amounts) seen again = the same entity re-extracted
+                # from context that spans a chunk boundary — skip the duplicate.
+                # Same name with a DIFFERENT amount = the entity appears in a separate
+                # bill section and must be kept as its own row.
+                amounts_sig = frozenset(valid_amounts.items())
+                if (key, amounts_sig) in seen_exact:
+                    continue
+                seen_exact.add((key, amounts_sig))
+
+                if key not in canonical_name:
+                    canonical_name[key] = name.strip()
+                    all_entities[key] = valid_amounts
+                    all_pages[key] = start_page
+                else:
+                    # Same name already recorded with a different amount: a separate
+                    # appropriation elsewhere in the bill. Store under a unique internal
+                    # key; display name gets a "(p. N)" suffix for disambiguation.
+                    page_key = f"{key} [p{start_page}]"
+                    counter = 2
+                    while page_key in canonical_name:
+                        page_key = f"{key} [p{start_page}:{counter}]"
+                        counter += 1
+                    canonical_name[page_key] = f"{name.strip()} (p. {start_page})"
+                    all_entities[page_key] = valid_amounts
+                    all_pages[page_key] = start_page
 
                 chunk_entity_count += 1
 
@@ -211,58 +237,70 @@ def extract_budget_data(pdf_path: str) -> dict:
     # ---------------------------------------------------------------------------
 
     _personal_name_re = re.compile(r'^[A-Z][A-Za-z\-]+,\s+[A-Z][a-z]+$')
+    _page_suffix_re   = re.compile(r'\s*\(p\.\s*[\d:]+\)\s*$')
+
+    def _base_name(name: str) -> str:
+        """Strip the '(p. N)' page-disambiguation suffix from same-name section variants."""
+        return _page_suffix_re.sub('', name).strip()
 
     display_names = {k: canonical_name[k] for k in all_entities}
 
     def _word_set(name: str) -> frozenset:
-        """Normalize a name to a set of words, ignoring punctuation and order."""
-        return frozenset(re.sub(r'[,\-/]', ' ', name.lower()).split())
+        """Normalize to a word set ignoring punctuation/order, using the base name
+        so page-suffix variants group correctly with their base entry."""
+        return frozenset(re.sub(r'[,\-/]', ' ', _base_name(name).lower()).split())
 
-    # Word-set deduplication: names that are word-order rearrangements of each
-    # other refer to the same entity across chunks.
-    # Example: "Education, State Department Of" == "State Department Of Education"
-    # Keep only the entry with the highest appropriation total.
+    # Word-set deduplication: names that are word-order rearrangements of each other
+    # (e.g. "Education, State Department Of" == "State Department Of Education") are
+    # duplicates. Page-suffix variants ("[pN]" internal key) are intentional separate
+    # appropriations — never merge them.
     word_set_groups: dict = {}
     for key in all_entities:
         ws = _word_set(canonical_name[key])
         word_set_groups.setdefault(ws, []).append(key)
 
     word_set_dupes: set = set()
-    for keys in word_set_groups.values():
-        if len(keys) > 1:
-            best = max(keys, key=lambda k: sum(all_entities[k].values()))
-            for k in keys:
-                if k != best:
-                    word_set_dupes.add(k)
+    for keys_in_group in word_set_groups.values():
+        if len(keys_in_group) > 1:
+            # Only merge entries that don't have a page-suffix internal key — those are
+            # intentional separate-section rows and must stay independent.
+            base_keys = [k for k in keys_in_group if '[p' not in k]
+            if len(base_keys) > 1:
+                best = max(base_keys, key=lambda k: sum(all_entities[k].values()))
+                for k in base_keys:
+                    if k != best:
+                        word_set_dupes.add(k)
 
     def _is_sub_section(key: str) -> bool:
-        """True if another entity's full name is a prefix/substring of this
-        entity's name AND that other entity has a larger appropriation.
-        Example: "State Board Of Education, Local Boards Of Education" ($5.9B)
-                 is a sub-section of "State Board Of Education" ($7.2B)."""
-        name = display_names[key].lower()
+        """True if another entity's base name is a substring of this entity's base name
+        AND that other entity has a larger appropriation — indicating this is a sub-section.
+        Uses base names to avoid false positives on page-suffix variants of the same entity."""
+        name = _base_name(display_names[key]).lower()
         amt  = sum(all_entities[key].values())
         for other_key, other_name in display_names.items():
             if other_key == key:
                 continue
-            other_lower = other_name.lower()
-            if other_lower in name and other_lower != name:
+            other_base = _base_name(other_name).lower()
+            if other_base == name:
+                continue  # Same base name (page-suffix variant) — not a sub-section
+            if other_base in name and other_base != name:
                 other_amt = sum(all_entities[other_key].values())
                 if other_amt > amt:
                     return True
         return False
 
     def _is_fragment_duplicate(key: str) -> bool:
-        """True if this entity's name is a substring of a much larger entity
-        (10x+ amount). Catches short fragment names like "Law Enforcement Agency"
-        ($174K) that are noise inside "Law Enforcement Agency, State" ($275M)."""
-        name = display_names[key].lower()
+        """True if this entity's base name is a substring of a much larger entity's
+        base name (10x+ amount) — a short fragment noise entry."""
+        name = _base_name(display_names[key]).lower()
         amt  = sum(all_entities[key].values())
         for other_key, other_name in display_names.items():
             if other_key == key:
                 continue
-            other_lower = other_name.lower()
-            if name in other_lower and other_lower != name:
+            other_base = _base_name(other_name).lower()
+            if other_base == name:
+                continue  # Same base name (page-suffix variant) — not a fragment
+            if name in other_base and other_base != name:
                 other_amt = sum(all_entities[other_key].values())
                 if other_amt > amt * 10:
                     return True
