@@ -399,14 +399,12 @@ def generate_excel_report(data: dict, source_file: str, output_path: str):
 
     fys          = data["fiscal_years"]
     entities     = data["entities"]
-    entity_pages = data.get("entity_pages", {})
     grand_totals = data["grand_totals"]
     bill_totals  = data["bill_grand_totals"]
 
-    # Column layout: [Name] [Page] [FY1] [FY2] ...
-    PAGE_COL = 2
-    FY_START = 3
-    num_cols = 2 + len(fys)   # name + page + fiscal years
+    # Column layout: [Name] [FY1] [FY2] ...
+    FY_START = 2
+    num_cols = 1 + len(fys)   # name + fiscal years
 
     # --- Row 1: Title ---------------------------------------------------------
     ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=num_cols)
@@ -436,12 +434,6 @@ def generate_excel_report(data: dict, source_file: str, output_path: str):
     c.alignment = Alignment(horizontal="left", vertical="center")
     c.border    = _border()
 
-    c = ws.cell(row=4, column=PAGE_COL, value="Page")
-    c.font      = Font(name="Arial", size=11, bold=True, color=COLOR_HEADER_FG)
-    c.fill      = _fill(COLOR_HEADER_BG)
-    c.alignment = Alignment(horizontal="center", vertical="center")
-    c.border    = _border()
-
     for col, fy in enumerate(fys, start=FY_START):
         c = ws.cell(row=4, column=col, value=fy)
         c.font      = Font(name="Arial", size=11, bold=True, color=COLOR_HEADER_FG)
@@ -453,18 +445,11 @@ def generate_excel_report(data: dict, source_file: str, output_path: str):
     for offset, (name, amounts) in enumerate(entities.items()):
         r    = 5 + offset
         fill = COLOR_ROW_EVEN if offset % 2 == 0 else COLOR_ROW_ODD
-        page = entity_pages.get(name)
 
         c = ws.cell(row=r, column=1, value=name)
         c.font      = Font(name="Arial", size=10)
         c.fill      = _fill(fill)
         c.alignment = Alignment(horizontal="left", vertical="center")
-        c.border    = _border()
-
-        c = ws.cell(row=r, column=PAGE_COL, value=page)
-        c.font      = Font(name="Arial", size=10)
-        c.fill      = _fill(fill)
-        c.alignment = Alignment(horizontal="center", vertical="center")
         c.border    = _border()
 
         for col, fy in enumerate(fys, start=FY_START):
@@ -485,11 +470,6 @@ def generate_excel_report(data: dict, source_file: str, output_path: str):
     c.alignment = Alignment(horizontal="left", vertical="center")
     c.border    = _border()
 
-    # blank page cell on totals row
-    c = ws.cell(row=next_row, column=PAGE_COL, value=None)
-    c.fill   = _fill(COLOR_TOTAL_BG)
-    c.border = _border()
-
     for col, fy in enumerate(fys, start=FY_START):
         amt = grand_totals.get(fy, 0)
         c = ws.cell(row=next_row, column=col, value=amt if amt else None)
@@ -509,10 +489,6 @@ def generate_excel_report(data: dict, source_file: str, output_path: str):
         c.fill      = _fill(COLOR_HEADER_BG)
         c.alignment = Alignment(horizontal="left", vertical="center")
         c.border    = _border()
-
-        c = ws.cell(row=next_row, column=PAGE_COL, value=None)
-        c.fill   = _fill(COLOR_HEADER_BG)
-        c.border = _border()
 
         for col, fy in enumerate(fys, start=FY_START):
             amt = bill_totals.get(fy, 0)
@@ -549,8 +525,7 @@ def generate_excel_report(data: dict, source_file: str, output_path: str):
                 value=(
                     "Methodology: Appropriations were extracted from the source PDF using AI (GPT-4o). "
                     "Each named agency, department, cabinet, or bureau is listed with its all-funds appropriation "
-                    "for the identified fiscal year(s). The Page column indicates the PDF page where the "
-                    "appropriation appears. Grand-total and rollup lines are excluded to prevent "
+                    "for the identified fiscal year(s). Grand-total and rollup lines are excluded to prevent "
                     "double-counting. Verify all figures against the enrolled bill before citing."
                 ))
     c.font      = Font(name="Arial", size=8, italic=True, color=COLOR_NOTES_FG)
@@ -558,8 +533,7 @@ def generate_excel_report(data: dict, source_file: str, output_path: str):
     ws.row_dimensions[next_row].height = 54
 
     # --- Column widths and freeze ---------------------------------------------
-    ws.column_dimensions["A"].width = 52          # entity name
-    ws.column_dimensions["B"].width = 7           # page number
+    ws.column_dimensions["A"].width = 60          # entity name
     for col in range(FY_START, num_cols + 1):
         ws.column_dimensions[get_column_letter(col)].width = 20
     ws.freeze_panes = "A5"
