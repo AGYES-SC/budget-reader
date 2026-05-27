@@ -573,6 +573,17 @@ def main():
         print(f"  Using cached extraction — delete {cache_path.name} to re-run AI extraction")
         with open(cache_path) as f:
             data = json.load(f)
+        # Migrate old-format cache (single 'entities' dict) to new two-dict schema
+        if "entities" in data and "section_totals" not in data:
+            print("  (migrating old cache format to section_totals/sub_allocations)")
+            data["section_totals"]  = data.pop("entities")
+            data["sub_allocations"] = {}
+            data.pop("entity_pages", None)
+            # Recompute grand_totals from section_totals to be safe
+            data["grand_totals"] = {
+                fy: sum(e.get(fy, 0) for e in data["section_totals"].values())
+                for fy in data.get("fiscal_years", [])
+            }
     else:
         data = extract_budget_data(pdf_path)
         with open(cache_path, 'w') as f:
