@@ -13,6 +13,7 @@ import sys
 import os
 import json
 import re
+from collections import deque
 from pathlib import Path
 from datetime import datetime
 import pdfplumber
@@ -38,14 +39,13 @@ def extract_budget_data(pdf_path: str) -> dict:
     client = openai.OpenAI(api_key=api_key)
 
     # Build page-aware chunks (~40K chars each).
-    # Each page is prefixed with "--- PAGE N ---" so GPT-4o can report
-    # the source page number for every entity it extracts.
+    # Chunks are stored as lists of (page_num, tagged_text) so they can be
+    # split in half and retried automatically when GPT-4o hits the token limit.
     PAGE_CHUNK_LIMIT = 40_000
-    chunks = []           # list of (label, text)
-    current_parts = []
-    current_len = 0
-    chunk_start_page = 1
-    page_count = 0
+    initial_chunks = []   # list of [(page_num, tagged_text), ...]
+    current_pages  = []
+    current_len    = 0
+    page_count     = 0
 
     with pdfplumber.open(pdf_path) as pdf:
         page_count = len(pdf.pages)
@@ -56,17 +56,14 @@ def extract_budget_data(pdf_path: str) -> dict:
                 continue
             tagged = f"--- PAGE {page_num} ---\n{page_text}"
             tagged_len = len(tagged)
-            if current_parts and current_len + tagged_len > PAGE_CHUNK_LIMIT:
-                label = f"pages {chunk_start_page}–{page_num - 1} of {page_count}"
-                chunks.append((label, '\n'.join(current_parts), chunk_start_page))
-                current_parts = []
-                current_len = 0
-                chunk_start_page = page_num
-            current_parts.append(tagged)
+            if current_pages and current_len + tagged_len > PAGE_CHUNK_LIMIT:
+                initial_chunks.append(current_pages)
+                current_pages = []
+                current_len   = 0
+            current_pages.append((page_num, tagged))
             current_len += tagged_len
-        if current_parts:
-            label = f"pages {chunk_start_page}–{page_count} of {page_count}"
-            chunks.append((label, '\n'.join(current_parts), chunk_start_page))
+        if current_pages:
+            initial_chunks.append(current_pages)
 
     system_prompt = (
         "You are a state budget bill analyst. Extract every named appropriation from the "
@@ -118,13 +115,23 @@ def extract_budget_data(pdf_path: str) -> dict:
     # all_entities:   lowercase key -> {fy: amount}
     # all_pages:      lowercase key -> page number (start page of chunk where first seen)
     canonical_name: dict = {}
-    all_entities: dict = {}
-    all_pages: dict = {}
+    all_entities:   dict = {}
+    all_pages:      dict = {}
     all_fiscal_years: list = []
 
-    print(f"  Extracting with GPT-4o — {len(chunks)} chunk(s)...")
-    for idx, (label, chunk, chunk_start) in enumerate(chunks, 1):
-        print(f"    Chunk {idx}/{len(chunks)}: {label}")
+    # Use a work queue so chunks that hit the token limit can be split in half
+    # and retried automatically without losing any entities.
+    work_queue = deque(initial_chunks)
+    print(f"  Extracting with GPT-4o — {len(initial_chunks)} chunk(s)...")
+
+    while work_queue:
+        pages = work_queue.popleft()
+        start_page = pages[0][0]
+        end_page   = pages[-1][0]
+        label      = f"pages {start_page}–{end_page} of {page_count}"
+        chunk_text = '\n'.join(text for _, text in pages)
+
+        print(f"    Chunk: {label}")
         try:
             response = client.chat.completions.create(
                 model="gpt-4o",
@@ -134,18 +141,26 @@ def extract_budget_data(pdf_path: str) -> dict:
                 response_format={"type": "json_object"},
                 messages=[
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": f"Extract appropriations ({label}):\n\n{chunk}"},
+                    {"role": "user", "content": f"Extract appropriations ({label}):\n\n{chunk_text}"},
                 ],
             )
             finish_reason = response.choices[0].finish_reason
             raw = response.choices[0].message.content or ""
 
             if finish_reason == "length":
-                warnings.append(
-                    f"Chunk {idx} ({label}): response hit token limit — some entities may be missing. "
-                    "Delete the cache file and re-run to retry."
-                )
-                print(f"    WARNING: chunk {idx} hit token limit — partial results only")
+                if len(pages) > 1:
+                    # Split in half and re-queue — no entities are lost
+                    mid = len(pages) // 2
+                    work_queue.appendleft(pages[mid:])
+                    work_queue.appendleft(pages[:mid])
+                    print(f"      → token limit hit — splitting into {mid} + {len(pages) - mid} pages")
+                    continue
+                else:
+                    # Single-page chunk; can't split further
+                    warnings.append(
+                        f"{label}: single-page chunk hit token limit — entities on this page may be incomplete."
+                    )
+                    print(f"      WARNING: single-page chunk hit token limit")
 
             data = json.loads(raw)
 
@@ -163,10 +178,9 @@ def extract_budget_data(pdf_path: str) -> dict:
                 if key not in canonical_name:
                     canonical_name[key] = name.strip()
                     all_entities[key] = {}
-                    # Page number = start page of the chunk where entity first appears.
-                    # Derived from the chunk label rather than GPT-4o output, so large
-                    # numbers with comma separators can never corrupt the page field.
-                    all_pages[key] = chunk_start
+                    # Page number derived from chunk metadata, not GPT-4o output,
+                    # so comma-separated large numbers can never corrupt this field.
+                    all_pages[key] = start_page
 
                 for fy, amt in amounts.items():
                     try:
@@ -182,14 +196,13 @@ def extract_budget_data(pdf_path: str) -> dict:
             print(f"      → {chunk_entity_count} entities found")
             if chunk_entity_count == 0:
                 warnings.append(
-                    f"Chunk {idx} ({label}): 0 entities returned — "
-                    "this page range may be missing from the report."
+                    f"{label}: 0 entities returned — this page range may be missing from the report."
                 )
-                print("      WARNING: no entities found in this chunk — pages may be missing")
+                print("      WARNING: no entities found in this chunk")
 
         except Exception as exc:
-            warnings.append(f"Chunk {idx} ({label}) error: {exc}")
-            print(f"    ERROR on chunk {idx}: {exc}")
+            warnings.append(f"{label} error: {exc}")
+            print(f"    ERROR: {exc}")
 
     fiscal_years = all_fiscal_years or ['Total']
 
